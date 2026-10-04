@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>FPV Battle Car - Tactical Cockpit</title>
+    <meta name="description" content="Ultra-low-latency Web Cockpit for Internet-controlled FPV RC Battle Car">
+    <!-- Modern Typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="cockpit-container">
+        <!-- Top Tactical HUD Bar -->
+        <header class="top-hud">
+            <div class="hud-brand">
+                <span class="hud-logo">⚡ FPV TACTICAL</span>
+                <span id="room-display" class="hud-badge">ROOM: BATTLE_1</span>
+            </div>
+
+            <!-- Battery & Health Telemetry -->
+            <div class="hud-telemetry-group">
+                <div class="telemetry-item" id="battery-container">
+                    <span class="telemetry-label">2S BATTERY</span>
+                    <div class="battery-meter-wrapper">
+                        <div id="battery-bar" class="battery-meter-fill" style="width: 100%;"></div>
+                    </div>
+                    <span id="battery-value" class="telemetry-value">--.- V</span>
+                </div>
+
+                <div class="telemetry-item">
+                    <span class="telemetry-label">WI-FI RSSI</span>
+                    <span id="rssi-value" class="telemetry-value">-- dBm</span>
+                </div>
+
+                <div class="telemetry-item">
+                    <span class="telemetry-label">CONTROL ACK (p50)</span>
+                    <span id="latency-p50" class="telemetry-value highlight">-- ms</span>
+                </div>
+
+                <div class="telemetry-item">
+                    <span class="telemetry-label">STATUS</span>
+                    <span id="vehicle-status" class="status-badge status-offline">DISCONNECTED</span>
+                </div>
+            </div>
+
+            <!-- Connection Controls -->
+            <div class="hud-controls">
+                <button id="btn-connect" class="btn btn-connect">CONNECT</button>
+                <button id="btn-settings" class="btn btn-settings">⚙</button>
+            </div>
+        </header>
+
+        <!-- Main Video Viewport & FPV Canvas -->
+        <main class="viewport-area">
+            <canvas id="fpv-canvas" width="640" height="480"></canvas>
+            
+            <!-- Video Overlay Sight / Crosshairs -->
+            <div class="crosshair-overlay">
+                <div class="crosshair-center"></div>
+                <div class="crosshair-lines"></div>
+            </div>
+
+            <!-- Failsafe / Warning Banner -->
+            <div id="warning-banner" class="warning-banner hidden">
+                <span id="warning-text">EMERGENCY BRAKE ENGAGED</span>
+            </div>
+
+            <!-- Real-time Video Pipeline Telemetry HUD (Bottom Left Overlay) -->
+            <div class="video-stats-overlay">
+                <div class="stat-line"><span>CAM FPS:</span> <strong id="stat-cam-fps">--</strong></div>
+                <div class="stat-line"><span>RELAY FPS:</span> <strong id="stat-relay-fps">--</strong></div>
+                <div class="stat-line"><span>RECV FPS:</span> <strong id="stat-recv-fps">--</strong></div>
+                <div class="stat-line"><span>RENDER FPS:</span> <strong id="stat-render-fps">--</strong></div>
+                <div class="stat-line"><span>DROP RATE:</span> <strong id="stat-drop-rate">0%</strong></div>
+                <div class="stat-divider"></div>
+                <div class="stat-line"><span>ACK p95 / p99:</span> <strong id="stat-ack-p95">-- / -- ms</strong></div>
+                <div class="stat-line"><span>RELAY RTT:</span> <strong id="stat-relay-rtt">-- ms</strong></div>
+            </div>
+
+            <!-- Active Throttle Bars (Left & Right Wheels) -->
+            <div class="wheel-telemetry left-wheel">
+                <div class="wheel-bar-container">
+                    <div id="left-wheel-bar" class="wheel-bar"></div>
+                </div>
+                <span id="left-wheel-text">L: 0%</span>
+            </div>
+
+            <div class="wheel-telemetry right-wheel">
+                <div class="wheel-bar-container">
+                    <div id="right-wheel-bar" class="wheel-bar"></div>
+                </div>
+                <span id="right-wheel-text">R: 0%</span>
+            </div>
+        </main>
+
+        <!-- Bottom Action Bar & Touch Controls -->
+        <footer class="bottom-bar">
+            <!-- Left Touch Joystick Zone (Mobile) -->
+            <div class="touch-zone" id="touch-left-zone">
+                <div class="joystick-base" id="joystick-base">
+                    <div class="joystick-thumb" id="joystick-thumb"></div>
+                </div>
+            </div>
+
+            <!-- Quick Action Combat Buttons -->
+            <div class="action-buttons-cluster">
+                <button id="btn-brake" class="btn btn-danger btn-large">🛑 DYNAMIC BRAKE <span class="kbd-hint">(SPACE)</span></button>
+                <div class="aux-row">
+                    <button id="btn-headlight" class="btn btn-aux">🔦 LIGHTS <span class="kbd-hint">(L)</span></button>
+                    <button id="btn-weapon" class="btn btn-aux">🎯 FIRE AUX <span class="kbd-hint">(F)</span></button>
+                </div>
+            </div>
+
+            <!-- Gamepad / Input Status Display -->
+            <div class="input-telemetry-zone">
+                <div class="input-device-indicator">
+                    <span id="input-device-label">KEYBOARD / TOUCH ACTIVE</span>
+                </div>
+                <div class="input-shortcuts">
+                    <span>W/S: Throttle</span>
+                    <span>A/D: Steering</span>
+                    <span>SPACE: Brake</span>
+                </div>
+            </div>
+        </footer>
+
+        <!-- Settings Modal (Host, Port, Room, WSS) -->
+        <div id="settings-modal" class="modal hidden">
+            <div class="modal-card">
+                <h2>CONNECTION CONFIGURATION</h2>
+                <div class="form-group">
+                    <label for="cfg-relay-host">Relay Host / IP</label>
+                    <input type="text" id="cfg-relay-host" value="localhost">
+                </div>
+                <div class="form-group">
+                    <label for="cfg-relay-port">Relay Port</label>
+                    <input type="number" id="cfg-relay-port" value="8080">
+                </div>
+                <div class="form-group">
+                    <label for="cfg-room">Battle Room ID</label>
+                    <input type="text" id="cfg-room" value="battle_room_1">
+                </div>
+                <div class="form-group">
+                    <label for="cfg-token">Relay Token (blank if none)</label>
+                    <input type="password" id="cfg-token" autocomplete="off">
+                </div>
+                <div class="form-group-checkbox">
+                    <input type="checkbox" id="cfg-use-ssl">
+                    <label for="cfg-use-ssl">Use Secure WebSocket (wss://)</label>
+                </div>
+                <div class="modal-actions">
+                    <button id="btn-save-settings" class="btn btn-primary">SAVE & APPLY</button>
+                    <button id="btn-close-settings" class="btn btn-secondary">CANCEL</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,574 @@
+/* ==========================================================================
+   FPV Battle Car - Tactical Glassmorphism Stylesheet
+   ========================================================================== */
+
+:root {
+    --bg-dark: #070a0e;
+    --bg-card: rgba(14, 20, 29, 0.75);
+    --border-glass: rgba(0, 240, 255, 0.2);
+    --border-glass-glow: rgba(0, 240, 255, 0.4);
+    
+    --accent-cyan: #00f0ff;
+    --accent-green: #00ff88;
+    --accent-amber: #ffb800;
+    --accent-red: #ff003c;
+    --text-primary: #e6f1ff;
+    --text-secondary: #8892b0;
+    
+    --font-heading: 'Orbitron', monospace, sans-serif;
+    --font-body: 'Rajdhani', sans-serif;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+body, html {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: var(--bg-dark);
+    font-family: var(--font-body);
+    color: var(--text-primary);
+}
+
+.cockpit-container {
+    display: flex;
+    flex-direction: column;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh; /* mobile: excludes the browser address bar */
+    position: relative;
+    background: radial-gradient(circle at center, #0f1624 0%, #05070a 100%);
+}
+
+/* ==========================================================================
+   Top Tactical HUD Bar
+   ========================================================================== */
+.top-hud {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 60px;
+    padding: 0 20px;
+    background: var(--bg-card);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border-glass);
+    z-index: 100;
+}
+
+.hud-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.hud-logo {
+    font-family: var(--font-heading);
+    font-size: 1.1rem;
+    font-weight: 900;
+    letter-spacing: 1.5px;
+    color: var(--accent-cyan);
+    text-shadow: 0 0 10px rgba(0, 240, 255, 0.6);
+}
+
+.hud-badge {
+    font-size: 0.8rem;
+    font-weight: 700;
+    padding: 4px 8px;
+    background: rgba(0, 240, 255, 0.1);
+    border: 1px solid var(--border-glass);
+    border-radius: 4px;
+    color: var(--text-secondary);
+}
+
+.hud-telemetry-group {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+}
+
+.telemetry-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+}
+
+.telemetry-label {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+}
+
+.telemetry-value {
+    font-family: var(--font-heading);
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.telemetry-value.highlight {
+    color: var(--accent-cyan);
+}
+
+/* Battery Gauge */
+.battery-meter-wrapper {
+    width: 70px;
+    height: 8px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+    margin: 2px 0;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.battery-meter-fill {
+    height: 100%;
+    background: var(--accent-green);
+    transition: width 0.3s ease, background 0.3s ease;
+}
+
+.status-badge {
+    font-family: var(--font-heading);
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 3px 8px;
+    border-radius: 3px;
+    letter-spacing: 0.5px;
+}
+
+.status-offline {
+    background: rgba(255, 0, 60, 0.2);
+    border: 1px solid var(--accent-red);
+    color: var(--accent-red);
+}
+
+.status-warn {
+    background: rgba(255, 184, 0, 0.2);
+    border: 1px solid var(--accent-amber);
+    color: var(--accent-amber);
+}
+
+.status-online {
+    background: rgba(0, 255, 136, 0.2);
+    border: 1px solid var(--accent-green);
+    color: var(--accent-green);
+    box-shadow: 0 0 8px rgba(0, 255, 136, 0.4);
+}
+
+.hud-controls {
+    display: flex;
+    gap: 10px;
+}
+
+/* Buttons */
+.btn {
+    font-family: var(--font-heading);
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border: 1px solid transparent;
+}
+
+.btn-connect {
+    background: linear-gradient(135deg, rgba(0, 240, 255, 0.2), rgba(0, 150, 255, 0.4));
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
+}
+
+.btn-connect:hover {
+    background: var(--accent-cyan);
+    color: #000;
+    box-shadow: 0 0 15px rgba(0, 240, 255, 0.8);
+}
+
+.btn-settings {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: var(--text-primary);
+}
+
+.btn-settings:hover {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+/* ==========================================================================
+   Main Video Viewport & Overlays
+   ========================================================================== */
+.viewport-area {
+    flex: 1;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    overflow: hidden;
+}
+
+#fpv-canvas {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background-color: #05080c;
+}
+
+/* Crosshair Reticle */
+.crosshair-overlay {
+    position: absolute;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.35;
+}
+
+.crosshair-center {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--accent-cyan);
+    border-radius: 50%;
+}
+
+.crosshair-lines {
+    position: absolute;
+    width: 80px;
+    height: 80px;
+    border-top: 1px dashed var(--accent-cyan);
+    border-bottom: 1px dashed var(--accent-cyan);
+    border-left: 1px dashed var(--accent-cyan);
+    border-right: 1px dashed var(--accent-cyan);
+}
+
+/* Warning Banner */
+.warning-banner {
+    position: absolute;
+    top: 20px;
+    padding: 10px 24px;
+    background: rgba(255, 0, 60, 0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid #ff4d6d;
+    border-radius: 4px;
+    color: #fff;
+    font-family: var(--font-heading);
+    font-size: 1rem;
+    font-weight: 900;
+    letter-spacing: 1.5px;
+    box-shadow: 0 0 20px rgba(255, 0, 60, 0.7);
+    animation: pulse 1s infinite alternate;
+    z-index: 50;
+}
+
+@keyframes pulse {
+    0% { transform: scale(1); opacity: 0.85; }
+    100% { transform: scale(1.03); opacity: 1; }
+}
+
+.hidden {
+    display: none !important;
+}
+
+/* Video Stats Overlay (Bottom Left) */
+.video-stats-overlay {
+    position: absolute;
+    bottom: 15px;
+    left: 15px;
+    background: var(--bg-card);
+    backdrop-filter: blur(8px);
+    padding: 8px 12px;
+    border: 1px solid var(--border-glass);
+    border-radius: 4px;
+    font-family: var(--font-heading);
+    font-size: 0.68rem;
+    line-height: 1.5;
+    z-index: 40;
+}
+
+.stat-line {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.stat-line span {
+    color: var(--text-secondary);
+}
+
+.stat-line strong {
+    color: var(--accent-cyan);
+}
+
+.stat-divider {
+    height: 1px;
+    background: var(--border-glass);
+    margin: 4px 0;
+}
+
+/* Throttle Bars on Left/Right Edges */
+.wheel-telemetry {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-heading);
+    font-size: 0.75rem;
+    color: var(--accent-cyan);
+    z-index: 40;
+}
+
+.wheel-telemetry.left-wheel { left: 20px; }
+.wheel-telemetry.right-wheel { right: 20px; }
+
+.wheel-bar-container {
+    width: 14px;
+    height: 140px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-glass);
+    border-radius: 3px;
+    position: relative;
+    overflow: hidden;
+}
+
+.wheel-bar {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    background: var(--accent-cyan);
+    box-shadow: 0 0 10px rgba(0, 240, 255, 0.7);
+    bottom: 50%;
+    height: 0%;
+    transition: height 0.05s linear;
+}
+
+/* ==========================================================================
+   Bottom Action Bar & Controls
+   ========================================================================== */
+.bottom-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 100px;
+    padding: 0 25px;
+    background: var(--bg-card);
+    backdrop-filter: blur(12px);
+    border-top: 1px solid var(--border-glass);
+    z-index: 100;
+}
+
+.touch-zone {
+    width: 90px;
+    height: 90px;
+    position: relative;
+}
+
+.joystick-base {
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    background: rgba(0, 240, 255, 0.08);
+    border: 2px dashed var(--border-glass-glow);
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: none;
+}
+
+.joystick-thumb {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: radial-gradient(circle, var(--accent-cyan) 0%, rgba(0, 150, 255, 0.6) 100%);
+    box-shadow: 0 0 12px var(--accent-cyan);
+    position: absolute;
+    pointer-events: none;
+    transition: transform 0.05s ease-out;
+}
+
+.action-buttons-cluster {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.btn-large {
+    padding: 12px 28px;
+    font-size: 0.95rem;
+}
+
+.btn-danger {
+    background: rgba(255, 0, 60, 0.2);
+    border: 1px solid var(--accent-red);
+    color: #ff3366;
+}
+
+.btn-danger:hover, .btn-danger:active {
+    background: var(--accent-red);
+    color: #fff;
+    box-shadow: 0 0 20px rgba(255, 0, 60, 0.8);
+}
+
+.aux-row {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+}
+
+.btn-aux {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-glass);
+    color: var(--text-primary);
+    font-size: 0.75rem;
+    padding: 6px 12px;
+}
+
+.btn-aux:hover, .btn-aux.active {
+    background: rgba(0, 240, 255, 0.2);
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
+}
+
+.input-telemetry-zone {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.input-device-indicator {
+    font-family: var(--font-heading);
+    font-size: 0.8rem;
+    color: var(--accent-green);
+    margin-bottom: 4px;
+}
+
+.input-shortcuts {
+    display: flex;
+    gap: 10px;
+    font-size: 0.7rem;
+}
+
+/* ==========================================================================
+   Modal Dialog
+   ========================================================================== */
+.modal {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(8px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-card {
+    width: 380px;
+    background: #0d131a;
+    border: 1px solid var(--accent-cyan);
+    box-shadow: 0 0 25px rgba(0, 240, 255, 0.3);
+    border-radius: 6px;
+    padding: 24px;
+}
+
+.modal-card h2 {
+    font-family: var(--font-heading);
+    font-size: 1.1rem;
+    color: var(--accent-cyan);
+    margin-bottom: 20px;
+    letter-spacing: 1px;
+}
+
+.form-group {
+    margin-bottom: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.form-group label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+}
+
+.form-group input[type="text"],
+.form-group input[type="number"] {
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    color: #fff;
+    font-family: var(--font-heading);
+    font-size: 0.9rem;
+}
+
+.form-group input:focus {
+    outline: none;
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 8px rgba(0, 240, 255, 0.5);
+}
+
+.form-group-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 15px 0 25px 0;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.btn-primary {
+    background: var(--accent-cyan);
+    color: #000;
+}
+
+.btn-secondary {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-secondary);
+}
+
+/* ============================================================================
+   PHONES / TOUCH
+   ============================================================================ */
+@media (pointer: coarse), (max-width: 900px) {
+    .kbd-hint, .input-telemetry-zone { display: none; }
+    .touch-zone { width: 150px; height: 150px; display: flex; align-items: center; justify-content: center; }
+    .top-hud { height: auto; flex-wrap: wrap; gap: 6px 12px; padding: 6px 10px; }
+    .hud-telemetry-group { gap: 12px; flex-wrap: wrap; }
+    .hud-logo { font-size: 0.85rem; }
+    .bottom-bar { height: auto; padding: 8px 12px; gap: 12px; }
+    .btn-large { padding: 14px 16px; }
+    .video-stats-overlay { font-size: 0.55rem; padding: 4px 8px; top: 8px; bottom: auto; left: 8px; }
+}
+
+/* Landscape phone: controls float over the video so it keeps the full height. */
+@media (pointer: coarse) and (orientation: landscape), (max-height: 500px) {
+    .top-hud { padding: 4px 10px; }
+    .hud-badge, .hud-logo, .wheel-telemetry { display: none; }
+    .bottom-bar {
+        position: absolute; left: 0; right: 0; bottom: 0;
+        background: transparent; border: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+        pointer-events: none;
+    }
+    .bottom-bar > * { pointer-events: auto; }
+}
