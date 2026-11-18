@@ -43,6 +43,11 @@ static void send(int8_t l, int8_t r, uint8_t flags = 0, uint8_t ver = 1, size_t 
     b[2] = seq >> 8; b[3] = seq & 0xFF;
     wsControl.cb(WStype_BIN, b, len);
 }
+static void sendAs(uint16_t sq, int8_t l, int8_t r, uint16_t session = 0xBEEF) {
+    uint8_t b[8] = {(uint8_t)(session >> 8), (uint8_t)session, (uint8_t)(sq >> 8), (uint8_t)sq,
+                    (uint8_t)l, (uint8_t)r, 0, 1};
+    wsControl.cb(WStype_BIN, b, 8);
+}
 static void drive(int8_t l, int8_t r, uint32_t ms, uint8_t flags = 0) {
     uint32_t start = millis();
     while ((uint32_t)(millis() - start) < ms) { send(l, r, flags); run(20); }
@@ -131,15 +136,25 @@ int main(int argc, char**) {
     send(100, 100); run(4);
     CHECK(L() == 255, "drives again after brake released");
 
-    // ---- failsafe timing ----
+    // ---- link loss: hold 300 ms, fade to 0 by 800 ms, then brake + FAILSAFE ----
     send(80, 80); run(290);
-    CHECK(L() == D(80), "still driving at 290 ms: L=%d", L());
-    run(20);
-    CHECK(L() == BRAKE, "failsafe brake by 310 ms: L=%d", L());
+    CHECK(L() == D(80), "full command held at 290 ms: L=%d", L());
+    run(260);   // ~550 ms: half way down the fade
+    CHECK(!motors.isFailsafeActive() && motors.isFading(), "fading, not failsafe, at ~550 ms");
+    CHECK(abs(L() - D(80) / 2) <= D(80) / 8, "about half throttle at ~550 ms: L=%d (full %d)", L(), D(80));
+    CHECK(lastAck().flags & 0x20, "ACK reports fading (bit5): %02x", lastAck().flags);
+    run(240);   // ~790 ms
+    CHECK(L() != BRAKE && !motors.isFailsafeActive(), "not braked yet at ~790 ms: L=%d", L());
+    run(20);    // ~810 ms
+    CHECK(L() == BRAKE && motors.isFailsafeActive(), "brake + failsafe by ~810 ms: L=%d", L());
     run(260);
     CHECK(lastAck().flags & 1, "ACK reports failsafe");
     send(80, 80); run(4);
     CHECK(L() == D(80), "re-arms on next packet: L=%d", L());
+    send(80, 80); run(500);
+    CHECK(motors.isFading() && L() < D(80), "fading again 500 ms after the last packet: L=%d", L());
+    send(80, 80); run(4);
+    CHECK(L() == D(80) && !motors.isFading(), "a packet mid-fade restores the full command: L=%d", L());
 
     // ---- disconnect = immediate brake (no 300 ms of stale drive) ----
     send(100, 100); run(10);
@@ -154,7 +169,11 @@ int main(int argc, char**) {
     CHECK(L() == D(60), "drives after reconnect: L=%d", L());
 
     // ---- ACK: on receipt, echoes seq, rate-limited to 100 ms ----
-    run(300);
+    // Sync to the 250 ms fallback ACK, then wait 150 ms so the last ACK is >100 ms old.
+    // A bare run(300) left the phase to chance: battery.update() advances the mock clock.
+    wsControl.sent.clear();
+    while (wsControl.sent.empty()) run(1);
+    run(150);
     wsControl.sent.clear();
     send(60, 60);
     uint16_t sentSeq = seq;
@@ -163,6 +182,35 @@ int main(int argc, char**) {
     CHECK(a.seq == sentSeq && a.session == 0xBEEF, "ACK echoes session/seq: %04x/%u", a.session, a.seq);
     for (int i = 0; i < 9; i++) { run(10); send(60, 60); }
     CHECK(wsControl.sent.size() <= 2, "ACKs rate-limited to 10 Hz: %zu in 90 ms", wsControl.sent.size());
+
+    // ---- newest wins: duplicates (the other path's copy) and older seqs are ignored ----
+    send(40, 40); run(4);
+    uint16_t cur = seq;
+    sendAs(cur, 90, 90); run(4);
+    CHECK(L() == D(40), "duplicate seq ignored: L=%d", L());
+    sendAs(cur - 5, 90, 90); run(4);
+    CHECK(L() == D(40), "older seq ignored: L=%d", L());
+    run(250);
+    for (int i = 0; i < 10; i++) { sendAs(cur, 40, 40); run(20); }   // ~450 ms of stale copies only
+    CHECK(motors.isFading(), "stale copies do not refresh the failsafe");
+    sendAs(cur + 1, 60, 60); run(4);
+    CHECK(L() == D(60), "next newer seq applies: L=%d", L());
+    sendAs(1, 70, 70, 0x1234); run(4);
+    CHECK(L() == D(70), "new session (page reload) accepted at once: L=%d", L());
+    seq = cur + 2;
+    send(40, 40); run(4);
+    CHECK(L() == D(40), "back on the old session: L=%d", L());
+
+    // ---- drain: a burst queued behind a TCP stall is applied in one loop pass ----
+    for (int i = 1; i <= 20; i++) {
+        uint16_t sq = seq + i;
+        uint8_t b[8] = {0xBE, 0xEF, (uint8_t)(sq >> 8), (uint8_t)sq, (uint8_t)(i * 5), (uint8_t)(i * 5), 0, 1};
+        wsControl.rx.emplace_back(b, b + 8);
+    }
+    seq += 20;
+    loop();
+    CHECK(wsControl.rx.empty(), "whole burst drained in one loop(): %zu left", wsControl.rx.size());
+    CHECK(L() == D(100), "newest command of the burst applied: L=%d", L());
 
 #if BATTERY_ADC_PIN >= 0
     // ---- battery: throttle cap at 6.5 V ----
@@ -211,12 +259,47 @@ int main(int argc, char**) {
     CHECK(a.batt == 0 && (a.flags & 0x1E) == 0x10, "sensor off: batt=%u flags=%02x", a.batt, a.flags);
 #endif
 
+    // ---- UDP path: hello, source check, drive, ACK route, WebSocket drop while UDP is live ----
+    IPAddress relay = WiFi.relay;
+    udp.sent.clear();
+    run(1100);
+    std::string hello = std::string("HELLO ") + ROOM_ID + " " + RELAY_TOKEN;
+    auto hellos = std::count_if(udp.sent.begin(), udp.sent.end(), [&](const Datagram& d) {
+        return d.ip == relay && d.port == RELAY_UDP_PORT && std::string(d.data.begin(), d.data.end()) == hello; });
+    CHECK(hellos >= 1, "hello to the relay's UDP port: %d", (int)hellos);
+    CHECK(udp.bound && udp.localPort == CAR_UDP_PORT, "UDP socket bound");
+    auto udpPkt = [&](IPAddress ip, uint16_t port, int8_t l, int8_t r) {
+        seq++;
+        uint8_t b[8] = {0xBE, 0xEF, (uint8_t)(seq >> 8), (uint8_t)seq, (uint8_t)l, (uint8_t)r, 0, 1};
+        udp.rx.push_back({ip, port, {b, b + 8}});
+    };
+    udpPkt(IPAddress(10, 0, 0, 9), RELAY_UDP_PORT, 100, 100); run(4);
+    CHECK(L() == BRAKE, "UDP control from another address ignored: L=%d", L());
+    udpPkt(relay, 9999, 100, 100); run(4);
+    CHECK(L() == BRAKE, "UDP control from the relay's address but wrong port ignored: L=%d", L());
+    udp.sent.clear();
+    udpPkt(relay, RELAY_UDP_PORT, 70, 70); run(4);
+    CHECK(L() == D(70), "UDP control from the relay drives: L=%d", L());
+    bool ackUdp = std::any_of(udp.sent.begin(), udp.sent.end(), [&](const Datagram& d) {
+        return d.ip == relay && d.port == RELAY_UDP_PORT && d.data.size() == 8; });
+    CHECK(ackUdp, "ACK goes back over UDP while UDP delivers");
+    wsControl.connected = false;
+    wsControl.cb(WStype_DISCONNECTED, nullptr, 0);
+    CHECK(L() == D(70), "WebSocket drop while UDP is live: no instant brake: L=%d", L());
+    udpPkt(relay, RELAY_UDP_PORT, 30, 30); run(4);
+    CHECK(L() == D(30), "keeps driving on UDP alone: L=%d", L());
+    run(900);
+    CHECK(L() == BRAKE, "UDP stops too: failsafe brake: L=%d", L());
+    wsControl.connected = true;
+    wsControl.cb(WStype_CONNECTED, (uint8_t*)"/", 1);
+    run(1200);   // UDP goes stale: ACKs back on the WebSocket
+
     // ---- millis() wraparound (day 49.7) ----
     drive(50, 50, 1100);
     mock::now_ms = 0xFFFFFFFFu - 150;
     send(50, 50); run(250);
     CHECK(L() == D(50), "driving across millis wrap: L=%d", L());
-    run(60);
+    run(600);
     CHECK(L() == BRAKE, "failsafe still fires across wrap: L=%d", L());
 
     CHECK(std::find_if(ev.begin(), ev.end(), [](const std::string& s) { return s.rfind("UNATTACHED", 0) == 0; }) == ev.end(),

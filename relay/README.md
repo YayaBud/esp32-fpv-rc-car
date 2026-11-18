@@ -29,6 +29,9 @@ Ultra-low-latency dual-WebSocket relay server for Internet-controlled FPV RC bat
    npm start
    ```
    The relay will listen on port `8080` (or `PORT` environment variable).
+   It also listens on **UDP `8081`** (or `UDP_PORT`): the car's weak-link control path. Open it in the
+   firewall / VPS security group. nginx does not proxy UDP; the car sends to `RELAY_HOST:8081` directly.
+   If UDP is blocked the car still drives over the WebSocket, with TCP's 1-2 s stalls on a weak link.
    Set `RELAY_TOKEN` to require a shared secret on every WebSocket connection.
 
 4. Run the tests:

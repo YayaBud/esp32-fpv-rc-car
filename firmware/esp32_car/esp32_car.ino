@@ -13,6 +13,15 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
+// Wi-Fi firmware updates (ArduinoOTA). Off unless secrets.h sets OTA_PASSWORD, so nobody
+// else on a shared network can flash the car. The host test build has no ArduinoOTA.h.
+// Not __has_include: arduino-cli's library scan sees it false and silently drops OTA.
+#ifdef ARDUINO_ARCH_ESP32
+#include <ArduinoOTA.h>
+#define HAVE_OTA 1
+#else
+#define HAVE_OTA 0
+#endif
 #include "config.h"
 #include "motor.h"
 #include "battery.h"
@@ -23,6 +32,25 @@
 #else
 #error "Copy secrets.example.h to secrets.h and fill in Wi-Fi + relay settings"
 #endif
+
+// UDP control path: the relay sends every command over UDP *and* the WebSocket; newest seq wins.
+// On a weak link TCP went silent for >= 1.5 s while ping never passed 327 ms (measured 2026-10-24).
+// ponytail: off with USE_WSS until UDP packets are authenticated (HMAC with RELAY_TOKEN); over the
+// internet it would otherwise be a plaintext path next to a TLS WebSocket.
+#ifndef USE_UDP_CONTROL
+#define USE_UDP_CONTROL (!USE_WSS)
+#endif
+#ifndef RELAY_UDP_PORT
+#define RELAY_UDP_PORT 8081
+#endif
+#define CAR_UDP_PORT   4211
+#include <WiFiUdp.h>
+static WiFiUDP udp;
+static IPAddress relayIP;          // RELAY_HOST, resolved once Wi-Fi is up
+static bool udpEverRx = false;
+static uint32_t lastUdpRxMs = 0;   // last control datagram from the relay
+static uint32_t wsFrames = 0;      // control frames seen on the WebSocket (drain loop)
+static bool udpFresh() { return udpEverRx && millis() - lastUdpRxMs < 1000; }
 
 WebSocketsClient wsControl;
 #if ENABLE_VIDEO
@@ -45,7 +73,32 @@ static ControlState ctrl = {0, 0, 0, 0, 0};
 
 static uint32_t lastAckMs = 0;
 
-void sendTelemetryACK();  // used by onControlEvent; explicit so the host test build compiles
+void sendTelemetryACK();  // used by applyControl; explicit so the host test build compiles
+
+// One entry point for both paths. Returns true if the packet was applied.
+static bool applyControl(const uint8_t *payload, size_t length) {
+    if (length != 8 || payload[7] != 0x01) return false; // 8-byte binary control packet, version 1
+    uint16_t session_id = (payload[0] << 8) | payload[1];
+    uint16_t seq        = (payload[2] << 8) | payload[3];
+    // Newest wins: each command arrives twice (UDP + WebSocket) and a TCP stall replays old ones in
+    // a burst. Stale copies are dropped and do not refresh the failsafe. After a full failsafe any
+    // valid packet re-syncs (new page = new session id; also covers a session id collision).
+    if (!motors.isFailsafeActive() && session_id == ctrl.session_id && (int16_t)(seq - ctrl.seq) <= 0)
+        return false;
+
+    ctrl.session_id = session_id;
+    ctrl.seq = seq;
+    ctrl.left_throttle  = constrain((int8_t)payload[4], (int8_t)-100, (int8_t)100);
+    ctrl.right_throttle = constrain((int8_t)payload[5], (int8_t)-100, (int8_t)100);
+    ctrl.flags = payload[6];
+
+    motors.notifyPacketReceived();
+
+    if (millis() - lastAckMs >= TELEMETRY_INTERVAL_MS) {
+        sendTelemetryACK(); // real round-trip latency, not up to 100ms of wait
+    }
+    return true;
+}
 
 // ============================================================================
 // WEBSOCKET CONTROL CLIENT HANDLER
@@ -53,8 +106,13 @@ void sendTelemetryACK();  // used by onControlEvent; explicit so the host test b
 void onControlEvent(WStype_t type, uint8_t * payload, size_t length) {
     switch (type) {
         case WStype_DISCONNECTED:
-            Serial.println("[WS-CTRL] Disconnected! Engaging failsafe...");
-            motors.tripFailsafe();
+            // Brake at once, unless UDP is still delivering: then the fade/failsafe timer covers it.
+            if (udpFresh()) {
+                Serial.println("[WS-CTRL] Disconnected; UDP control still live.");
+            } else {
+                Serial.println("[WS-CTRL] Disconnected! Engaging failsafe...");
+                motors.tripFailsafe();
+            }
             break;
 
         case WStype_CONNECTED:
@@ -62,25 +120,8 @@ void onControlEvent(WStype_t type, uint8_t * payload, size_t length) {
             break;
 
         case WStype_BIN:
-            if (length == 8 && payload[7] == 0x01) { // 8-byte binary control packet, version 1
-                uint16_t session_id = (payload[0] << 8) | payload[1];
-                uint16_t seq        = (payload[2] << 8) | payload[3];
-                int8_t left         = constrain((int8_t)payload[4], (int8_t)-100, (int8_t)100);
-                int8_t right        = constrain((int8_t)payload[5], (int8_t)-100, (int8_t)100);
-                uint8_t flags       = payload[6];
-
-                ctrl.session_id = session_id;
-                ctrl.seq = seq;
-                ctrl.left_throttle = left;
-                ctrl.right_throttle = right;
-                ctrl.flags = flags;
-
-                motors.notifyPacketReceived();
-
-                if (millis() - lastAckMs >= TELEMETRY_INTERVAL_MS) {
-                    sendTelemetryACK(); // real round-trip latency, not up to 100ms of wait
-                }
-            }
+            wsFrames++;
+            applyControl(payload, length);
             break;
 
         case WStype_PONG:
@@ -138,11 +179,70 @@ void videoStreamingTask(void * pvParameters) {
 // ============================================================================
 // Status flag bits:
 //   bit0 failsafe active | bit1 throttle limited | bit2 battery warning
-//   bit3 battery hard cutoff | bit4 no battery sensor
+//   bit3 battery hard cutoff | bit4 no battery sensor | bit5 link degraded (fading)
+// One line per change of what the motors are told: to Serial and, on real hardware, as a UDP
+// datagram to RELAY_HOST:DRIVE_LOG_PORT so a drive can be verified with no USB cable attached.
+// ponytail: plain UDP, fire-and-forget; lines can drop on bad Wi-Fi. It's a debug aid, not telemetry.
+#define DRIVE_LOG_PORT 4210
+void logDriveChange() {
+    static int last = -1;
+    const char *mode = battery.isHardCutoff() ? "CUTOFF" : motors.isFailsafeActive() ? "FAILSAFE"
+                     : (ctrl.flags & 1) ? "BRAKE" : "DRIVE";
+    int key = (ctrl.left_throttle + 128) | (ctrl.right_throttle + 128) << 8 | (mode[0] << 16);
+    if (key == last) return;
+    last = key;
+    char line[80];
+    snprintf(line, sizeof line, "[DRIVE] t=%lu %s L=%d R=%d seq=%u", (unsigned long)millis(), mode,
+             ctrl.left_throttle, ctrl.right_throttle, ctrl.seq);
+    Serial.println(line);
+    if (WiFi.status() == WL_CONNECTED && relayIP != IPAddress()) {
+        udp.beginPacket(relayIP, DRIVE_LOG_PORT);
+        udp.write((const uint8_t *)line, strlen(line));
+        udp.endPacket();
+    }
+}
+
+// Hello every 1 s registers this car's address with the relay (and keeps a NAT mapping open),
+// then every queued datagram is read, so a burst costs one loop pass.
+static void serviceUdp() {
+    static uint32_t lastHelloMs = 0, lastDnsMs = 0;
+    static bool bound = false;
+    if (WiFi.status() != WL_CONNECTED) return;
+    if (relayIP == IPAddress()) {
+        if (lastDnsMs && millis() - lastDnsMs < 5000) return;   // don't block every loop on DNS
+        lastDnsMs = millis() | 1;
+        if (!WiFi.hostByName(RELAY_HOST, relayIP)) return;
+    }
+#if USE_UDP_CONTROL
+    if (!bound) bound = udp.begin(CAR_UDP_PORT);
+    if (millis() - lastHelloMs >= 1000) {
+        lastHelloMs = millis();
+        char hello[80];
+        int n = snprintf(hello, sizeof hello, "HELLO %s %s", ROOM_ID, RELAY_TOKEN);
+        udp.beginPacket(relayIP, RELAY_UDP_PORT);
+        udp.write((const uint8_t *)hello, n);
+        udp.endPacket();
+    }
+    uint8_t buf[16];
+    for (int i = 0; i < 32; i++) {
+        if (udp.parsePacket() <= 0) break;
+        // Only the relay may steer: anything from another address or port is dropped.
+        bool fromRelay = udp.remoteIP() == relayIP && udp.remotePort() == RELAY_UDP_PORT;
+        int n = udp.read(buf, sizeof buf);
+        if (!fromRelay || n != 8) continue;
+        lastUdpRxMs = millis();
+        udpEverRx = true;
+        applyControl(buf, 8);
+    }
+#endif
+}
+
 void sendTelemetryACK() {
     lastAckMs = millis();
 
-    if (!wsControl.isConnected()) return;
+    // Over UDP while UDP is delivering (a stalled TCP uplink would hold ACKs back), else WebSocket.
+    bool viaUdp = USE_UDP_CONTROL && udpFresh();
+    if (!viaUdp && !wsControl.isConnected()) return;
 
     uint16_t batt_mv = battery.getPackMilliVolts();
     int8_t rssi = (int8_t)WiFi.RSSI();
@@ -153,6 +253,7 @@ void sendTelemetryACK() {
     if (battery.getStatus() == BATT_WARNING)       status_flags |= (1 << 2);
     if (battery.isHardCutoff())                    status_flags |= (1 << 3);
     if (!battery.isSensorPresent())                status_flags |= (1 << 4);
+    if (motors.isFading())                         status_flags |= (1 << 5);
 
     uint8_t packet[8];
     packet[0] = (ctrl.session_id >> 8) & 0xFF;
@@ -164,7 +265,13 @@ void sendTelemetryACK() {
     packet[6] = (uint8_t)rssi;
     packet[7] = status_flags;
 
-    wsControl.sendBIN(packet, 8);
+    if (viaUdp) {
+        udp.beginPacket(relayIP, RELAY_UDP_PORT);
+        udp.write(packet, 8);
+        udp.endPacket();
+    } else {
+        wsControl.sendBIN(packet, 8);
+    }
 }
 
 // ============================================================================
@@ -225,7 +332,18 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false); // Disable Wi-Fi modem sleep for minimum latency
     WiFi.setAutoReconnect(true);
+#if HAVE_OTA
+    // Why a join fails: 15/204 = wrong password, 201 = SSID not found (5 GHz-only?), 2/202 = auth
+    WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
+        Serial.printf("[WIFI] Disconnected, reason %u\n", info.wifi_sta_disconnected.reason);
+    }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+#endif
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+#if HAVE_OTA
+    // Only after begin(): before it the radio isn't started and setTxPower() is ignored.
+    WiFi.setTxPower(WIFI_TX_POWER);
+    Serial.printf(" [TX %.1f dBm]", WiFi.getTxPower() / 4.0f);
+#endif
 
     uint32_t wifi_start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - wifi_start < 10000) {
@@ -240,6 +358,16 @@ void setup() {
         Serial.println("\n[WIFI] Connection failed. Will keep retrying in the background.");
     }
 
+#if HAVE_OTA && defined(OTA_PASSWORD)
+    if (strlen(OTA_PASSWORD) > 0) {
+        ArduinoOTA.setHostname("fpv-car");
+        ArduinoOTA.setPassword(OTA_PASSWORD);
+        ArduinoOTA.onStart([]() { motors.tripFailsafe(); }); // brake before flashing
+        ArduinoOTA.begin();
+        Serial.println("[OTA] Wi-Fi updates enabled (fpv-car, port 3232).");
+    }
+#endif
+
     // 6. Configure WebSocket(s)
     String tokenSuffix = (strlen(RELAY_TOKEN) > 0) ? (String("&token=") + RELAY_TOKEN) : String("");
     String controlUrl = String("/ws/control?room=") + ROOM_ID + "&role=car" + tokenSuffix;
@@ -251,7 +379,9 @@ void setup() {
 #endif
     wsControl.onEvent(onControlEvent);
     wsControl.setReconnectInterval(1000);
-    wsControl.enableHeartbeat(2000, 1000, 2);
+    // Ping every 3 s, drop after 2 pongs later than 3 s. Was (2000, 1000, 2): phone hotspot
+    // RTT spikes to ~850 ms dropped the socket 18x in 75 s. Motor safety is the failsafe (config.h).
+    wsControl.enableHeartbeat(3000, 3000, 2);
 
 #if ENABLE_VIDEO
     String videoUrl = String("/ws/video?room=") + ROOM_ID + "&role=car" + tokenSuffix;
@@ -262,7 +392,7 @@ void setup() {
 #endif
     wsVideo.onEvent(onVideoEvent);
     wsVideo.setReconnectInterval(1000);
-    wsVideo.enableHeartbeat(2000, 1000, 2);
+    wsVideo.enableHeartbeat(3000, 3000, 2);
 
     // 7. Spawn video streaming task
     xTaskCreatePinnedToCore(
@@ -283,10 +413,20 @@ void setup() {
 void loop() {
     static uint32_t last_battery_time = 0;
 
-    // Service Control WebSocket client (runs onControlEvent synchronously)
-    wsControl.loop();
+    // Service the control WebSocket (runs onControlEvent synchronously). Drain every queued frame:
+    // the library hands over one per loop() call, so a post-stall burst replayed ~200 ms of old
+    // commands one pass at a time. Then the UDP path.
+    for (int i = 0; i < 32; i++) {
+        uint32_t before = wsFrames;
+        wsControl.loop();
+        if (wsFrames == before) break;
+    }
+    serviceUdp();
+#if HAVE_OTA && defined(OTA_PASSWORD)
+    ArduinoOTA.handle();
+#endif
 
-    // Evaluate failsafe watchdog (300 ms timeout)
+    // Link-loss watchdog: hold, fade, brake (config.h)
     motors.updateFailsafe();
 
     // Apply drive commands, or brake if failsafe/hard-cutoff is active
@@ -295,6 +435,7 @@ void loop() {
     } else {
         motors.setDrive(ctrl.left_throttle, ctrl.right_throttle, ctrl.flags, battery.isThrottleLimited());
     }
+    logDriveChange();
 
     // Update Battery ADC (1 Hz)
     if (millis() - last_battery_time >= 1000) {

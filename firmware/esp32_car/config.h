@@ -16,21 +16,30 @@
 // Two motors per side wired in parallel (same polarity):
 //   left pair  -> L298N OUT1/OUT2     right pair -> L298N OUT3/OUT4
 //
-// Wiring (L298N pin <- ESP32 pin). The four GPIOs are consecutive on the left
-// header (G32 G33 G25 G26), in the same order as IN1..IN4:
-//   IN1 <- GPIO32   IN2 <- GPIO33   (left side)
-//   IN3 <- GPIO25   IN4 <- GPIO26   (right side)
+// Wiring (L298N pin <- ESP32 pin), as wired on DevKit V1 board #2 (2026-10-26):
+//   IN1 <- GPIO14   IN2 <- GPIO27   (left side)
+//   IN3 <- GPIO26   IN4 <- GPIO32   (right side)
 //   ENA, ENB: leave the board's jumpers ON (always enabled; speed = PWM on IN pins)
 //   L298N GND <-> ESP32 GND (and battery -)       L298N 12V terminal <- battery +
 // Power the ESP32 from USB (or a power bank). Do NOT also wire L298N 5V -> ESP32 VIN
 // while USB is plugged in.
 //
 // Pins avoided on purpose: 0/2/5/12/15 (boot strapping), 6-11 (flash), 34-39 (input only),
-// 14 (outputs PWM during boot), ADC2 pins (unusable while Wi-Fi is on).
-#define MOTOR_L_IN1_PIN     32
-#define MOTOR_L_IN2_PIN     33
-#define MOTOR_R_IN1_PIN     25
-#define MOTOR_R_IN2_PIN     26
+// ADC2 *as analog input* (unusable while Wi-Fi is on; fine as motor outputs).
+// ponytail: GPIO14 is used anyway because that's how it's wired. It outputs PWM for a moment
+// at boot, so the left side can twitch at power-up; move that wire to GPIO33 to stop it.
+#ifndef MOTOR_L_IN1_PIN
+#define MOTOR_L_IN1_PIN     14
+#endif
+#ifndef MOTOR_L_IN2_PIN
+#define MOTOR_L_IN2_PIN     27
+#endif
+#ifndef MOTOR_R_IN1_PIN
+#define MOTOR_R_IN1_PIN     26
+#endif
+#ifndef MOTOR_R_IN2_PIN
+#define MOTOR_R_IN2_PIN     32
+#endif
 
 // --- Status LED (onboard blue LED, active HIGH) ---
 #define STATUS_LED_PIN       2
@@ -83,8 +92,23 @@
 // ============================================================================
 // TIMING & FAILSAFE CONSTANTS
 // ============================================================================
-#define FAILSAFE_TIMEOUT_MS  300       // Emergency motor cutoff after 300ms without control frame
+// Link loss, staged (Betaflight-style guard period): the last command holds for HOLD, then
+// throttle fades linearly to 0, and at BRAKE the motors short-brake and the FAILSAFE flag is set.
+// A valid packet at any point restores full control at once. Weak Wi-Fi gaps of 200-330 ms are
+// normal (measured), so a 300 ms cliff braked the car ~14x a minute.
+#ifndef FAILSAFE_HOLD_MS
+#define FAILSAFE_HOLD_MS     300
+#endif
+#ifndef FAILSAFE_BRAKE_MS
+#define FAILSAFE_BRAKE_MS    800
+#endif
 #define TELEMETRY_INTERVAL_MS 100      // Transmit telemetry ACK at 10 Hz
+
+// Wi-Fi transmit power. Max by default; a low value (-DWIFI_TX_POWER=WIFI_POWER_2dBm) makes
+// the link weak on purpose, to test link-loss handling on the bench.
+#ifndef WIFI_TX_POWER
+#define WIFI_TX_POWER  WIFI_POWER_19_5dBm
+#endif
 
 // ============================================================================
 // VIDEO (phase 2: needs a camera board, which a plain ESP32 DevKit is not)

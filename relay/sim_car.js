@@ -2,21 +2,27 @@
  * Simulated car — speaks the exact firmware protocol so the relay and cockpit
  * can be driven end-to-end without hardware.
  *
- * Mirrors firmware/esp32s3_car: 8-byte control packets (len 8, version 0x01,
- * throttle clamped to ±100), 300 ms failsafe, failsafe on control disconnect,
- * brake flag, duty mapping from motor.cpp, telemetry ACK on receipt (≥100 ms
- * apart) plus a 250 ms fallback. Adds 2-D differential-drive physics and
+ * Mirrors firmware/esp32_car: 8-byte control packets (len 8, version 0x01,
+ * throttle clamped to ±100), link loss = hold 300 ms / fade to 0 by 800 ms /
+ * brake + failsafe, newest seq wins (commands arrive over UDP and WebSocket),
+ * failsafe on control disconnect unless UDP is live, brake flag, duty mapping
+ * from motor.cpp, telemetry ACK on receipt (≥100 ms apart) plus a 250 ms
+ * fallback, over UDP while UDP delivers. Adds 2-D differential-drive physics and
  * streams a top-down PNG view on the video socket in place of the camera.
  *
  * CLI: node sim_car.js [--host localhost] [--port 8080] [--room battle_room_1]
- *                      [--token X] [--no-video] [--ssl]
+ *                      [--token X] [--no-video] [--ssl] [--udp-port 8081 | --no-udp]
  */
 
 const { EventEmitter } = require('events');
+const dgram = require('dgram');
+const dns = require('dns');
 const zlib = require('zlib');
 const WebSocket = require('ws');
 
-const FAILSAFE_TIMEOUT_MS = 300;
+const FAILSAFE_HOLD_MS = 300;    // config.h
+const FAILSAFE_BRAKE_MS = 800;
+const UDP_FRESH_MS = 1000;       // firmware udpFresh()
 const TELEMETRY_INTERVAL_MS = 100;
 const TELEMETRY_FALLBACK_MS = 250;
 const TICK_MS = 10;
@@ -47,16 +53,20 @@ function decodeControl(buf) {
 }
 
 class SimCar extends EventEmitter {
-    constructor({ url = 'ws://localhost:8080', room = 'battle_room_1', token = '', video = false, minDuty = 0 } = {}) {
+    constructor({ url = 'ws://localhost:8080', room = 'battle_room_1', token = '', video = false, minDuty = 0,
+                  udpPort = null } = {}) {
         super();
-        Object.assign(this, { url, room, token, video, minDuty });
+        Object.assign(this, { url, room, token, video, minDuty, udpPort });
         this.left = 0; this.right = 0; this.flags = 0;
         this.failsafe = true;
+        this.fading = false;
         this.dutyL = 0; this.dutyR = 0;
         this.x = ARENA_W / 2; this.y = ARENA_H / 2;
         this.heading = 0;     // radians; 0 = facing +y ("up" on screen), positive = clockwise
         this.trail = [];
-        this.packetsReceived = 0;
+        this.packetsReceived = 0;            // applied (newest) packets
+        this.udpApplied = 0; this.wsApplied = 0; this.staleDropped = 0; this.udpArrived = 0;
+        this._lastUdpRxAt = 0;
         this.lastSession = 0; this.lastSeq = 0;
         this.controlConnected = false;
         this._lastPacketAt = 0; this._lastAckAt = 0;
@@ -80,22 +90,31 @@ class SimCar extends EventEmitter {
             if (kind === 'control') { this.controlConnected = true; this.emit('connected'); }
         });
         ws.on('message', (data, isBinary) => {
-            if (kind === 'control' && isBinary) this._onControl(data);
+            if (kind === 'control' && isBinary) this._onControl(data, false);
         });
         ws.on('close', () => {
             if (kind === 'control') {
                 this.controlConnected = false;
-                this._tripFailsafe();   // firmware: WStype_DISCONNECTED -> tripFailsafe()
+                if (!this._udpFresh()) this._tripFailsafe();   // firmware: WStype_DISCONNECTED
                 this.emit('disconnected');
             }
             if (this._running) this._timers.push(setTimeout(() => this._open(kind), 1000));
         });
     }
 
-    _onControl(buf) {
+    _udpFresh() { return this._lastUdpRxAt > 0 && Date.now() - this._lastUdpRxAt < UDP_FRESH_MS; }
+
+    _onControl(buf, viaUdp) {
         const p = decodeControl(buf);
         if (!p) return;
+        // Newest wins (firmware applyControl): same session and not newer -> stale copy
+        const d = (p.seq - this.lastSeq) & 0xFFFF;
+        if (!this.failsafe && p.session === this.lastSession && (d === 0 || d >= 0x8000)) {
+            this.staleDropped++;
+            return;
+        }
         this.packetsReceived++;
+        if (viaUdp) this.udpApplied++; else this.wsApplied++;
         Object.assign(this, { left: p.left, right: p.right, flags: p.flags, lastSession: p.session, lastSeq: p.seq });
         this._lastPacketAt = Date.now();
         if (this.failsafe) { this.failsafe = false; this.emit('failsafe', false); }
@@ -109,22 +128,49 @@ class SimCar extends EventEmitter {
 
     _sendAck() {
         this._lastAckAt = Date.now();
+        const viaUdp = this._udp && this._udpFresh();
         const ws = this._sockets.control;
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!viaUdp && (!ws || ws.readyState !== WebSocket.OPEN)) return;
         const b = Buffer.alloc(8);
         b.writeUInt16BE(this.lastSession, 0);
         b.writeUInt16BE(this.lastSeq, 2);
         b.writeUInt16BE(7800, 4);          // fake 2S pack
         b.writeInt8(-55, 6);               // fake RSSI
-        b[7] = this.failsafe ? 1 : 0;
-        ws.send(b);
+        b[7] = (this.failsafe ? 1 : 0) | (this.fading ? 0x20 : 0);
+        if (viaUdp) this._udp.send(b, this.udpPort, this._relayAddr);
+        else ws.send(b);
+    }
+
+    // Firmware serviceUdp(): hello every 1 s, accept control only from the relay's address/port.
+    _startUdp() {
+        const host = new URL(this.url).hostname;
+        dns.lookup(host, { family: 4 }, (err, addr) => {
+            if (err || !this._running) return;
+            this._relayAddr = addr;
+            const sock = this._udp = dgram.createSocket('udp4');
+            sock.on('error', () => {});
+            sock.on('message', (msg, rinfo) => {
+                if (rinfo.address !== this._relayAddr || rinfo.port !== this.udpPort || msg.length !== 8) return;
+                this._lastUdpRxAt = Date.now();
+                this.udpArrived++;
+                this._onControl(msg, true);
+            });
+            const hello = () => sock.send(`HELLO ${this.room} ${this.token}`, this.udpPort, addr);
+            sock.bind(0, hello);
+            this._timers.push(setInterval(hello, 1000));
+        });
     }
 
     _tick() {
-        if (!this.failsafe && Date.now() - this._lastPacketAt > FAILSAFE_TIMEOUT_MS) this._tripFailsafe();
+        // motor.cpp updateFailsafe(): hold, then fade linearly, then brake
+        const gap = Date.now() - this._lastPacketAt;
+        if (!this.failsafe && gap > FAILSAFE_BRAKE_MS) this._tripFailsafe();
+        const fade256 = this.failsafe ? 0 : gap > FAILSAFE_HOLD_MS
+            ? Math.floor((FAILSAFE_BRAKE_MS - gap) * 256 / (FAILSAFE_BRAKE_MS - FAILSAFE_HOLD_MS)) : 256;
+        this.fading = !this.failsafe && fade256 < 256;
         const stopped = this.failsafe || (this.flags & 1);
-        this.dutyL = stopped ? 0 : throttleToDuty(this.left, this.minDuty);
-        this.dutyR = stopped ? 0 : throttleToDuty(this.right, this.minDuty);
+        this.dutyL = stopped ? 0 : Math.trunc(throttleToDuty(this.left, this.minDuty) * fade256 / 256);
+        this.dutyR = stopped ? 0 : Math.trunc(throttleToDuty(this.right, this.minDuty) * fade256 / 256);
 
         // Real elapsed time: Windows timers fire every ~15.6 ms, not TICK_MS.
         const now = performance.now();
@@ -148,6 +194,7 @@ class SimCar extends EventEmitter {
     start() {
         this._running = true;
         this._open('control');
+        if (this.udpPort) this._startUdp();
         if (this.video) {
             this._open('video');
             this._timers.push(setInterval(() => this._sendFrame(), 100));
@@ -165,6 +212,7 @@ class SimCar extends EventEmitter {
         this._timers.forEach((t) => { clearInterval(t); clearTimeout(t); });
         this._timers = [];
         for (const ws of Object.values(this._sockets)) ws.terminate();
+        if (this._udp) { this._udp.close(); this._udp = null; }
     }
 }
 
@@ -255,7 +303,8 @@ if (require.main === module) {
     const proto = args.includes('--ssl') ? 'wss' : 'ws';
     const url = `${proto}://${opt('host', 'localhost')}:${opt('port', '8080')}`;
     const car = new SimCar({
-        url, room: opt('room', 'battle_room_1'), token: opt('token', ''), video: !args.includes('--no-video')
+        url, room: opt('room', 'battle_room_1'), token: opt('token', ''), video: !args.includes('--no-video'),
+        udpPort: args.includes('--no-udp') ? null : Number(opt('udp-port', '8081'))
     }).start();
 
     car.on('connected', () => console.log(`[SIM] control connected to ${url} room=${car.room}`));
@@ -265,7 +314,8 @@ if (require.main === module) {
     setInterval(() => {
         const sign = (v) => (v >= 0 ? '+' : '') + v;
         const line = `L=${sign(car.left)} R=${sign(car.right)} dutyL=${car.dutyL} dutyR=${car.dutyR} ` +
-            `brake=${car.flags & 1} failsafe=${car.failsafe ? 1 : 0} pos=(${car.x.toFixed(2)},${car.y.toFixed(2)}) ` +
+            `brake=${car.flags & 1} failsafe=${car.failsafe ? 1 : 0} fading=${car.fading ? 1 : 0} ` +
+            `udp=${car.udpApplied} ws=${car.wsApplied} pos=(${car.x.toFixed(2)},${car.y.toFixed(2)}) ` +
             `hdg=${Math.round(((car.heading * 180 / Math.PI) % 360 + 360) % 360)}°`;
         if (line !== lastLine) { console.log(line); lastLine = line; }
     }, 200);

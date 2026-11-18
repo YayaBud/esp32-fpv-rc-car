@@ -5,8 +5,8 @@
  * !! RUN WITH THE WHEELS OFF THE GROUND (car on a box) !!
  *
  * Wiring (L298N <- ESP32):
- *   IN1 <- GPIO32   IN2 <- GPIO33   (left side: OUT1/OUT2, two motors in parallel)
- *   IN3 <- GPIO25   IN4 <- GPIO26   (right side: OUT3/OUT4, two motors in parallel)
+ *   IN1 <- GPIO14   IN2 <- GPIO27   (left side: OUT1/OUT2, two motors in parallel)
+ *   IN3 <- GPIO26   IN4 <- GPIO32   (right side: OUT3/OUT4, two motors in parallel)
  *   ENA, ENB: keep the board jumpers ON.   GND <-> GND.   12V terminal <- battery +.
  *   ESP32 powered from USB.
  *
@@ -28,10 +28,10 @@
 #include <esp_system.h>
 #include <stdarg.h>
 
-#define L_IN1 32
-#define L_IN2 33
-#define R_IN1 25
-#define R_IN2 26
+#define L_IN1 14
+#define L_IN2 27
+#define R_IN1 26
+#define R_IN2 32
 
 #define PWM_FREQ 5000
 #define PWM_RES  8
@@ -100,7 +100,7 @@ static void report(const char* what) {
         reg[i] = digitalMode ? (cmdDuty[i] > 0 ? 256 : 0) : ledcRead(PINS[i]);
         pad[i] = padPercent(PINS[i]);
     }
-    logf("%s | %s set: IN1(GPIO32)=%u IN2(GPIO33)=%u IN3(GPIO25)=%u IN4(GPIO26)=%u | PAD%%HIGH: IN1=%d IN2=%d IN3=%d IN4=%d",
+    logf("%s | %s set: IN1(GPIO14)=%u IN2(GPIO27)=%u IN3(GPIO26)=%u IN4(GPIO32)=%u | PAD%%HIGH: IN1=%d IN2=%d IN3=%d IN4=%d",
          what, digitalMode ? "DIG" : "PWM", reg[0], reg[1], reg[2], reg[3], pad[0], pad[1], pad[2], pad[3]);
 }
 

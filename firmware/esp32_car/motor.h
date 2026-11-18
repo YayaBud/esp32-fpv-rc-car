@@ -12,10 +12,12 @@ public:
     void notifyPacketReceived();
     void tripFailsafe();
     bool isFailsafeActive() const;
+    bool isFading() const { return !failsafe_tripped && fade_256 < 256; }
 
 private:
     uint32_t last_packet_time;
     bool failsafe_tripped;
+    int fade_256;   // 256 = full command, 0 = none (link-loss fade)
 
     int throttleToDuty(int8_t throttle, bool invert, bool limit_speed);
     void applyChannelPWM(uint8_t pin1, uint8_t pin2, int duty);

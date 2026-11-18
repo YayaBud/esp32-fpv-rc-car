@@ -2,163 +2,226 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>FPV Battle Car - Tactical Cockpit</title>
-    <meta name="description" content="Ultra-low-latency Web Cockpit for Internet-controlled FPV RC Battle Car">
-    <!-- Modern Typography -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0b0a26">
+    <title>FPV Tank Cockpit</title>
+    <meta name="description" content="Drive the FPV tank from a phone or PC: live video, link health, touch, keyboard or gamepad.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Jersey+10&family=Pixelify+Sans:wght@400..700&family=Silkscreen&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="cockpit-container">
-        <!-- Top Tactical HUD Bar -->
-        <header class="top-hud">
-            <div class="hud-brand">
-                <span class="hud-logo">⚡ FPV TACTICAL</span>
-                <span id="room-display" class="hud-badge">ROOM: BATTLE_1</span>
+    <div class="radio" id="radio" data-touch="one">
+
+        <header class="rail">
+            <div class="rail-id">
+                <span class="maker">FPV&middot;TANK</span>
+                <span class="room" id="room-display">battle_room_1</span>
             </div>
-
-            <!-- Battery & Health Telemetry -->
-            <div class="hud-telemetry-group">
-                <div class="telemetry-item" id="battery-container">
-                    <span class="telemetry-label">2S BATTERY</span>
-                    <div class="battery-meter-wrapper">
-                        <div id="battery-bar" class="battery-meter-fill" style="width: 100%;"></div>
-                    </div>
-                    <span id="battery-value" class="telemetry-value">--.- V</span>
-                </div>
-
-                <div class="telemetry-item">
-                    <span class="telemetry-label">WI-FI RSSI</span>
-                    <span id="rssi-value" class="telemetry-value">-- dBm</span>
-                </div>
-
-                <div class="telemetry-item">
-                    <span class="telemetry-label">CONTROL ACK (p50)</span>
-                    <span id="latency-p50" class="telemetry-value highlight">-- ms</span>
-                </div>
-
-                <div class="telemetry-item">
-                    <span class="telemetry-label">STATUS</span>
-                    <span id="vehicle-status" class="status-badge status-offline">DISCONNECTED</span>
-                </div>
-            </div>
-
-            <!-- Connection Controls -->
-            <div class="hud-controls">
-                <button id="btn-connect" class="btn btn-connect">CONNECT</button>
-                <button id="btn-settings" class="btn btn-settings">⚙</button>
+            <div class="rail-actions">
+                <a href="/" class="key key-icon" aria-label="Main menu" title="Main menu">
+                    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" shape-rendering="crispEdges"><g fill="currentColor"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></g></svg>
+                </a>
+                <button id="btn-connect" class="key key-connect" type="button" aria-pressed="false">
+                    <span class="led" aria-hidden="true"></span><span id="btn-connect-text">Connect</span>
+                </button>
+                <button id="btn-settings" class="key key-icon" type="button" aria-label="Settings">
+                    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" shape-rendering="crispEdges"><g fill="currentColor"><rect x="3" y="6" width="18" height="2"/><rect x="13" y="3" width="4" height="8"/><rect x="3" y="16" width="18" height="2"/><rect x="7" y="13" width="4" height="8"/></g></svg>
+                </button>
             </div>
         </header>
 
-        <!-- Main Video Viewport & FPV Canvas -->
-        <main class="viewport-area">
+        <section class="lcd" aria-label="Car telemetry">
+            <div class="lcd-glass">
+                <div class="lcd-head">
+                    <span class="lcd-k">Car</span>
+                    <span id="vehicle-status" class="status-badge status-offline">Offline</span>
+                </div>
+                <div class="lcd-cell">
+                    <span class="lcd-k">Batt</span>
+                    <span class="lcd-v" id="battery-value">--.-V</span>
+                    <span class="lcd-meter" aria-hidden="true"><i id="battery-bar"></i></span>
+                </div>
+                <div class="lcd-cell">
+                    <span class="lcd-k">Wi-Fi</span>
+                    <span class="lcd-v" id="rssi-value">---</span>
+                    <span class="lcd-bars" id="rssi-bars" data-level="0" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+                </div>
+                <div class="lcd-cell">
+                    <span class="lcd-k">Lag</span>
+                    <span class="lcd-v" id="latency-p50">---</span>
+                    <span class="lcd-u">ms</span>
+                </div>
+                <details class="lcd-more" id="lcd-more">
+                    <summary>Link details</summary>
+                    <dl>
+                        <dt>Lag p95 / p99</dt><dd id="stat-ack-p95">-- / -- ms</dd>
+                        <dt>Relay to car</dt><dd id="stat-relay-rtt">-- ms</dd>
+                        <dt>Camera fps</dt><dd id="stat-cam-fps">--</dd>
+                        <dt>Relay fps</dt><dd id="stat-relay-fps">--</dd>
+                        <dt>Received fps</dt><dd id="stat-recv-fps">--</dd>
+                        <dt>Drawn fps</dt><dd id="stat-render-fps">--</dd>
+                        <dt>Frames dropped</dt><dd id="stat-drop-rate">0%</dd>
+                    </dl>
+                </details>
+            </div>
+        </section>
+
+        <main class="scope">
             <canvas id="fpv-canvas" width="640" height="480"></canvas>
-            
-            <!-- Video Overlay Sight / Crosshairs -->
-            <div class="crosshair-overlay">
-                <div class="crosshair-center"></div>
-                <div class="crosshair-lines"></div>
+            <div class="reticle" aria-hidden="true"></div>
+            <div class="video-empty" id="video-empty">
+                <p class="video-empty-title" id="video-empty-text">Not connected</p>
+                <p class="video-empty-hint" id="video-empty-hint">Press Connect, then drive with W A S D, a gamepad or the sticks.</p>
             </div>
-
-            <!-- Failsafe / Warning Banner -->
-            <div id="warning-banner" class="warning-banner hidden">
-                <span id="warning-text">EMERGENCY BRAKE ENGAGED</span>
+            <button id="btn-track-reset" class="key key-small track-reset" type="button" hidden>Back to start <kbd>R</kbd></button>
+            <div id="warning-banner" class="warning hidden" role="status" aria-live="polite">
+                <span id="warning-text"></span>
             </div>
-
-            <!-- Real-time Video Pipeline Telemetry HUD (Bottom Left Overlay) -->
-            <div class="video-stats-overlay">
-                <div class="stat-line"><span>CAM FPS:</span> <strong id="stat-cam-fps">--</strong></div>
-                <div class="stat-line"><span>RELAY FPS:</span> <strong id="stat-relay-fps">--</strong></div>
-                <div class="stat-line"><span>RECV FPS:</span> <strong id="stat-recv-fps">--</strong></div>
-                <div class="stat-line"><span>RENDER FPS:</span> <strong id="stat-render-fps">--</strong></div>
-                <div class="stat-line"><span>DROP RATE:</span> <strong id="stat-drop-rate">0%</strong></div>
-                <div class="stat-divider"></div>
-                <div class="stat-line"><span>ACK p95 / p99:</span> <strong id="stat-ack-p95">-- / -- ms</strong></div>
-                <div class="stat-line"><span>RELAY RTT:</span> <strong id="stat-relay-rtt">-- ms</strong></div>
+            <div class="track track-l" aria-hidden="true">
+                <div class="track-rail"><div id="left-wheel-bar" class="track-fill"></div></div>
+                <span id="left-wheel-text">L 0</span>
             </div>
-
-            <!-- Active Throttle Bars (Left & Right Wheels) -->
-            <div class="wheel-telemetry left-wheel">
-                <div class="wheel-bar-container">
-                    <div id="left-wheel-bar" class="wheel-bar"></div>
-                </div>
-                <span id="left-wheel-text">L: 0%</span>
-            </div>
-
-            <div class="wheel-telemetry right-wheel">
-                <div class="wheel-bar-container">
-                    <div id="right-wheel-bar" class="wheel-bar"></div>
-                </div>
-                <span id="right-wheel-text">R: 0%</span>
+            <div class="track track-r" aria-hidden="true">
+                <div class="track-rail"><div id="right-wheel-bar" class="track-fill"></div></div>
+                <span id="right-wheel-text">R 0</span>
             </div>
         </main>
 
-        <!-- Bottom Action Bar & Touch Controls -->
-        <footer class="bottom-bar">
-            <!-- Left Touch Joystick Zone (Mobile) -->
-            <div class="touch-zone" id="touch-left-zone">
-                <div class="joystick-base" id="joystick-base">
-                    <div class="joystick-thumb" id="joystick-thumb"></div>
+        <section class="deck" aria-label="Controls">
+            <p class="input-source"><span class="lcd-k">Driving with</span> <span id="input-device-label">Keyboard</span></p>
+            <div class="sticks">
+                <div class="gimbal" id="stick-a" data-axis="xy">
+                    <div class="gimbal-thumb"></div>
+                    <span class="gimbal-label" id="stick-a-label">Drive</span>
+                </div>
+                <div class="gimbal" id="stick-b" data-axis="x">
+                    <div class="gimbal-thumb"></div>
+                    <span class="gimbal-label" id="stick-b-label">Steer</span>
                 </div>
             </div>
-
-            <!-- Quick Action Combat Buttons -->
-            <div class="action-buttons-cluster">
-                <button id="btn-brake" class="btn btn-danger btn-large">🛑 DYNAMIC BRAKE <span class="kbd-hint">(SPACE)</span></button>
-                <div class="aux-row">
-                    <button id="btn-headlight" class="btn btn-aux">🔦 LIGHTS <span class="kbd-hint">(L)</span></button>
-                    <button id="btn-weapon" class="btn btn-aux">🎯 FIRE AUX <span class="kbd-hint">(F)</span></button>
-                </div>
+            <div class="actions">
+                <button id="btn-brake" class="key key-brake" type="button">Brake <kbd>Space</kbd></button>
+                <button id="btn-headlight" class="key" type="button" aria-pressed="false">
+                    <span class="led" aria-hidden="true"></span>Lights <kbd>L</kbd>
+                </button>
+                <button id="btn-weapon" class="key" type="button">Fire <kbd>F</kbd></button>
             </div>
-
-            <!-- Gamepad / Input Status Display -->
-            <div class="input-telemetry-zone">
-                <div class="input-device-indicator">
-                    <span id="input-device-label">KEYBOARD / TOUCH ACTIVE</span>
-                </div>
-                <div class="input-shortcuts">
-                    <span>W/S: Throttle</span>
-                    <span>A/D: Steering</span>
-                    <span>SPACE: Brake</span>
-                </div>
-            </div>
-        </footer>
-
-        <!-- Settings Modal (Host, Port, Room, WSS) -->
-        <div id="settings-modal" class="modal hidden">
-            <div class="modal-card">
-                <h2>CONNECTION CONFIGURATION</h2>
-                <div class="form-group">
-                    <label for="cfg-relay-host">Relay Host / IP</label>
-                    <input type="text" id="cfg-relay-host" value="localhost">
-                </div>
-                <div class="form-group">
-                    <label for="cfg-relay-port">Relay Port</label>
-                    <input type="number" id="cfg-relay-port" value="8080">
-                </div>
-                <div class="form-group">
-                    <label for="cfg-room">Battle Room ID</label>
-                    <input type="text" id="cfg-room" value="battle_room_1">
-                </div>
-                <div class="form-group">
-                    <label for="cfg-token">Relay Token (blank if none)</label>
-                    <input type="password" id="cfg-token" autocomplete="off">
-                </div>
-                <div class="form-group-checkbox">
-                    <input type="checkbox" id="cfg-use-ssl">
-                    <label for="cfg-use-ssl">Use Secure WebSocket (wss://)</label>
-                </div>
-                <div class="modal-actions">
-                    <button id="btn-save-settings" class="btn btn-primary">SAVE & APPLY</button>
-                    <button id="btn-close-settings" class="btn btn-secondary">CANCEL</button>
-                </div>
-            </div>
-        </div>
+            <dl class="keymap">
+                <dt><kbd>W</kbd><kbd>S</kbd></dt><dd>Forward, reverse</dd>
+                <dt><kbd>A</kbd><kbd>D</kbd></dt><dd>Steer left, right</dd>
+                <dt><kbd>Space</kbd></dt><dd>Brake while held</dd>
+                <dt><kbd>R</kbd></dt><dd>Back to start (track view)</dd>
+                <dt>Gamepad</dt><dd>A brake, Y lights, RB fire</dd>
+            </dl>
+        </section>
     </div>
 
+    <dialog id="settings-modal" class="sheet" aria-labelledby="settings-title">
+        <form method="dialog" class="sheet-body">
+            <h2 id="settings-title">Settings</h2>
+
+            <fieldset>
+                <legend>Controls</legend>
+                <p class="note">Changes apply right away.</p>
+
+                <div class="field">
+                    <span class="field-label" id="lbl-touch">Touch and mouse sticks</span>
+                    <div class="segmented" role="radiogroup" aria-labelledby="lbl-touch">
+                        <label><input type="radio" name="touchLayout" value="one"><span>One stick</span></label>
+                        <label><input type="radio" name="touchLayout" value="two"><span>Two sticks</span></label>
+                        <label><input type="radio" name="touchLayout" value="tank"><span>Tank</span></label>
+                    </div>
+                    <p class="hint" id="touch-hint"></p>
+                </div>
+
+                <div class="field">
+                    <label class="field-label" for="cfg-pad-layout">Gamepad</label>
+                    <select id="cfg-pad-layout">
+                        <option value="split">Left stick throttle, right stick steer</option>
+                        <option value="single">Left stick does both</option>
+                        <option value="triggers">Triggers throttle, left stick steer</option>
+                        <option value="tank">Tank: each stick drives one track</option>
+                    </select>
+                </div>
+
+                <div class="field field-range">
+                    <label class="field-label" for="cfg-deadzone">Dead zone</label>
+                    <input type="range" id="cfg-deadzone" min="0" max="30" step="1">
+                    <output for="cfg-deadzone" id="out-deadzone"></output>
+                </div>
+                <div class="field field-range">
+                    <label class="field-label" for="cfg-expo">Expo</label>
+                    <input type="range" id="cfg-expo" min="0" max="100" step="5">
+                    <output for="cfg-expo" id="out-expo"></output>
+                </div>
+                <div class="field field-range">
+                    <label class="field-label" for="cfg-steer">Steering</label>
+                    <input type="range" id="cfg-steer" min="30" max="100" step="5">
+                    <output for="cfg-steer" id="out-steer"></output>
+                </div>
+                <div class="field field-range">
+                    <label class="field-label" for="cfg-speed">Speed limit</label>
+                    <input type="range" id="cfg-speed" min="25" max="100" step="5">
+                    <output for="cfg-speed" id="out-speed"></output>
+                </div>
+                <div class="field field-range">
+                    <label class="field-label" for="cfg-accel">Acceleration</label>
+                    <input type="range" id="cfg-accel" min="0" max="30" step="1">
+                    <output for="cfg-accel" id="out-accel"></output>
+                    <p class="hint">Time from stop to full speed. Letting go or braking still stops at once.</p>
+                </div>
+                <div class="field field-range">
+                    <label class="field-label" for="cfg-steer-speed">Steering at speed</label>
+                    <input type="range" id="cfg-steer-speed" min="30" max="100" step="5">
+                    <output for="cfg-steer-speed" id="out-steer-speed"></output>
+                    <p class="hint">Steering left at full speed, so fast turns don't spin out. 100% turns it off.</p>
+                </div>
+
+                <label class="check">
+                    <input type="checkbox" id="cfg-swap-steer">
+                    <span>Swap left and right <small>if the car turns the wrong way</small></span>
+                </label>
+
+                <button type="button" class="key key-small" id="btn-reset-controls">Reset controls</button>
+            </fieldset>
+
+            <fieldset>
+                <legend>Connection</legend>
+                <div class="field">
+                    <label class="field-label" for="cfg-relay-host">Relay address</label>
+                    <input type="text" id="cfg-relay-host" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="field field-pair">
+                    <div>
+                        <label class="field-label" for="cfg-relay-port">Port</label>
+                        <input type="number" id="cfg-relay-port" inputmode="numeric">
+                    </div>
+                    <div>
+                        <label class="field-label" for="cfg-room">Room</label>
+                        <input type="text" id="cfg-room" autocomplete="off" spellcheck="false">
+                    </div>
+                </div>
+                <div class="field">
+                    <label class="field-label" for="cfg-token">Relay token <small>blank if the relay has none</small></label>
+                    <input type="password" id="cfg-token" autocomplete="off">
+                </div>
+                <label class="check">
+                    <input type="checkbox" id="cfg-use-ssl">
+                    <span>Secure connection (wss://)</span>
+                </label>
+            </fieldset>
+
+            <!-- Save first in the DOM so Enter in a field saves; CSS puts Cancel on the left -->
+            <div class="sheet-actions">
+                <button type="submit" value="save" class="key key-primary" id="btn-save-settings">Save connection</button>
+                <button type="submit" value="cancel" class="key" id="btn-close-settings">Cancel</button>
+            </div>
+        </form>
+    </dialog>
+
+    <script src="bg.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

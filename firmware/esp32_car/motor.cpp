@@ -3,7 +3,7 @@
 MotorController motors;
 
 MotorController::MotorController()
-    : last_packet_time(0), failsafe_tripped(true) {}
+    : last_packet_time(0), failsafe_tripped(true), fade_256(256) {}
 
 void MotorController::begin() {
     if (!ledcAttach(MOTOR_L_IN1_PIN, MOTOR_PWM_FREQ, MOTOR_PWM_RES)) {
@@ -66,6 +66,8 @@ void MotorController::setDrive(int8_t left_throttle, int8_t right_throttle, uint
 
     int left_duty  = throttleToDuty(left_throttle, MOTOR_L_INVERT, limit_speed);
     int right_duty = throttleToDuty(right_throttle, MOTOR_R_INVERT, limit_speed);
+    left_duty  = left_duty * fade_256 / 256;
+    right_duty = right_duty * fade_256 / 256;
 
     applyChannelPWM(MOTOR_L_IN1_PIN, MOTOR_L_IN2_PIN, left_duty);
     applyChannelPWM(MOTOR_R_IN1_PIN, MOTOR_R_IN2_PIN, right_duty);
@@ -74,6 +76,7 @@ void MotorController::setDrive(int8_t left_throttle, int8_t right_throttle, uint
 void MotorController::notifyPacketReceived() {
     last_packet_time = millis();
     failsafe_tripped = false;
+    fade_256 = 256;
 }
 
 void MotorController::tripFailsafe() {
@@ -82,9 +85,16 @@ void MotorController::tripFailsafe() {
 }
 
 void MotorController::updateFailsafe() {
-    if (!failsafe_tripped && (millis() - last_packet_time > FAILSAFE_TIMEOUT_MS)) {
+    if (failsafe_tripped) return;
+    uint32_t gap = millis() - last_packet_time;
+    if (gap > FAILSAFE_BRAKE_MS) {
         failsafe_tripped = true;
+        fade_256 = 0;
         emergencyBrake();
+    } else if (gap > FAILSAFE_HOLD_MS) {
+        fade_256 = (int)((FAILSAFE_BRAKE_MS - gap) * 256 / (FAILSAFE_BRAKE_MS - FAILSAFE_HOLD_MS));
+    } else {
+        fade_256 = 256;
     }
 }
 

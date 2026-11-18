@@ -5,6 +5,8 @@
  * Endpoints:
  *   /ws/control?room=<room_id>&role=<car|controller>&token=<token>
  *   /ws/video?room=<room_id>&role=<car|controller>&token=<token>
+ *   udp :UDP_PORT (8081) - car control path for weak links: "HELLO <room> <token>" registers
+ *                          the car's address; 8-byte commands go out, 8-byte ACKs come back
  *   /health, /stats - HTTP health check & room statistics
  *   / , /index.html, /app.js, /style.css - static cockpit files
  */
@@ -15,16 +17,25 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const dgram = require('dgram');
 const { WebSocketServer, WebSocket } = require('ws');
+const { Ghosts, trackMessage } = require('./track');
 
 const PORT = process.env.PORT || 8080;
 const RELAY_TOKEN = process.env.RELAY_TOKEN || '';
 const VIDEO_HWM_BYTES = 32 * 1024;   // 32 KB drop-on-backpressure threshold for video
 const CONTROL_HWM_BYTES = 1024;      // drop stale control packets past this buffered amount
 const PING_INTERVAL_MS = 3000;       // 3 seconds transport Ping interval
+const MAX_MISSED_PONGS = 3;          // drop a socket after ~9 s with no pong
 const MAX_ROOMS = 64;
 const ROOM_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
 const COCKPIT_DIR = path.join(__dirname, '..', 'cockpit');
+const CLAIM_HOLD_MS = 10000;   // lobby hold on a handed-out room until its player connects
+// UDP control path: on a weak link TCP stalled >= 1.5 s while ping stayed under 327 ms (measured).
+// Every controller command goes to the car over UDP and the WebSocket; the car keeps the newest.
+const UDP_PORT = Number(process.env.UDP_PORT ?? 8081);
+const UDP_FRESH_MS = 3000;           // car's UDP address is used while hellos/ACKs keep arriving
+const HELLO_RE = /^HELLO ([A-Za-z0-9_-]{1,32}) ?([A-Za-z0-9]*)$/;
 
 // Room State Dictionary:
 // rooms[roomId] = {
@@ -39,6 +50,7 @@ function getOrCreateRoom(roomId) {
         rooms.set(roomId, {
             control: { car: null, controller: null },
             video:   { car: null, controller: null },
+            carUdp: null,    // { key, address, port, lastSeen } from the car's last hello
             stats: {
                 framesReceived: 0,
                 framesForwarded: 0,
@@ -46,6 +58,8 @@ function getOrCreateRoom(roomId) {
                 controlDropped: 0,
                 carRttMs: 0,
                 ctrlRttMs: 0,
+                udpToCar: 0,
+                udpFromCar: 0,
                 lastStatsReset: Date.now()
             }
         });
@@ -54,10 +68,58 @@ function getOrCreateRoom(roomId) {
 }
 
 function maybeCleanupRoom(roomId, room) {
-    if (!room.control.car && !room.control.controller && !room.video.car && !room.video.controller) {
+    if (!room.control.car && !room.control.controller && !room.video.car && !room.video.controller &&
+        !carUdpFresh(room)) {
+        if (room.carUdp) udpCars.delete(room.carUdp.key);
         rooms.delete(roomId);
+        ghosts.remove(roomId);
     }
 }
+
+// ============================================================================
+// UDP CONTROL PATH
+// ============================================================================
+const udpCars = new Map();   // "address:port" -> roomId
+const udp = dgram.createSocket('udp4');
+const carUdpFresh = (room) => !!room.carUdp && Date.now() - room.carUdp.lastSeen < UDP_FRESH_MS;
+
+udp.on('error', (err) => console.error('[UDP] Socket error (control stays on WebSocket):', err.message));
+
+udp.on('message', (msg, rinfo) => {
+    const key = `${rinfo.address}:${rinfo.port}`;
+
+    if (msg.length === 8) {
+        // Telemetry ACK, only from the address that said hello for its room
+        const room = rooms.get(udpCars.get(key));
+        if (!room || room.carUdp?.key !== key) return;
+        room.carUdp.lastSeen = Date.now();
+        room.stats.udpFromCar++;
+        const ctl = room.control.controller;
+        if (!ctl || ctl.readyState !== WebSocket.OPEN) return;
+        if (ctl.bufferedAmount > CONTROL_HWM_BYTES) {
+            room.stats.controlDropped++;
+            return;
+        }
+        ctl.send(msg, { binary: true });
+        return;
+    }
+
+    const m = msg.length <= 80 && HELLO_RE.exec(msg.toString('latin1'));
+    if (!m) return;
+    const [, roomId, token] = m;
+    if (RELAY_TOKEN && !tokenMatches(token)) return;
+    if (!rooms.has(roomId) && rooms.size >= MAX_ROOMS) return;
+
+    const room = getOrCreateRoom(roomId);
+    if (room.carUdp?.key !== key) {
+        if (room.carUdp) udpCars.delete(room.carUdp.key);
+        const other = rooms.get(udpCars.get(key));
+        if (other) other.carUdp = null;    // one address drives one room
+        udpCars.set(key, roomId);
+        console.log(`[UDP] Car hello: Room '${roomId}' from ${key}`);
+    }
+    room.carUdp = { key, address: rinfo.address, port: rinfo.port, lastSeen: Date.now() };
+});
 
 // ============================================================================
 // TOKEN CHECK (constant-time, via sha256 digest to avoid length leaks/mismatch)
@@ -72,9 +134,10 @@ function tokenMatches(provided) {
 // STATIC COCKPIT FILES (fixed whitelist only - never joins user input)
 // ============================================================================
 const STATIC_FILES = {
-    '/':           { file: 'index.html', type: 'text/html' },
+    '/':           { file: 'lobby.html', type: 'text/html' },
     '/index.html': { file: 'index.html', type: 'text/html' },
     '/app.js':     { file: 'app.js', type: 'text/javascript' },
+    '/bg.js':      { file: 'bg.js', type: 'text/javascript' },
     '/style.css':  { file: 'style.css', type: 'text/css' }
 };
 
@@ -100,11 +163,32 @@ const server = http.createServer((req, res) => {
                 controllerConnected: !!room.control.controller,
                 videoCarConnected: !!room.video.car,
                 videoControllerConnected: !!room.video.controller,
+                carUdp: carUdpFresh(room),
+                claimed: room.claimedUntil > Date.now(),
                 stats: room.stats
             };
         }
         res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
         res.end(JSON.stringify({ status: 'ok', uptime: process.uptime(), rooms: statsObj }, null, 2));
+        return;
+    }
+
+    // Lobby: hand a new player the car they picked (?room=) or else the first online car nobody
+    // is driving. The room is held for CLAIM_HOLD_MS so two players picking together can't both
+    // land in it (the second controller would kick the first). The hold ends when a controller connects.
+    if (pathname === '/claim') {
+        const now = Date.now();
+        const isFree = (id) => {
+            const r = rooms.get(id);
+            return r?.control.car?.readyState === WebSocket.OPEN && !r.control.controller &&
+                   !(r.claimedUntil > now);
+        };
+        const want = parsedUrl.searchParams.get('room');
+        const free = want ? (isFree(want) ? want : null) : [...rooms.keys()].sort().find(isFree);
+        if (free) rooms.get(free).claimedUntil = now + CLAIM_HOLD_MS;
+        res.writeHead(free ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        const cars = [...rooms.values()].filter((r) => r.control.car?.readyState === WebSocket.OPEN).length;
+        res.end(JSON.stringify({ room: free || null, cars }));
         return;
     }
 
@@ -211,6 +295,7 @@ wssControl.on('connection', (ws, req, { roomId, role }) => {
             room.control.controller.close(1000, 'Replaced by new controller');
         }
         room.control.controller = ws;
+        room.claimedUntil = 0;
     }
 
     // Native Pong listener for transport RTT measurement
@@ -225,6 +310,13 @@ wssControl.on('connection', (ws, req, { roomId, role }) => {
 
     ws.on('message', (data, isBinary) => {
         if (!isBinary || !Buffer.isBuffer(data) || data.length !== 8) return;
+        if (role === 'controller') ghosts.command(roomId, data);   // virtual track (read only)
+
+        // Weak-link path: every command also goes over UDP; the car keeps the newest copy
+        if (role === 'controller' && carUdpFresh(room)) {
+            udp.send(data, room.carUdp.port, room.carUdp.address);
+            room.stats.udpToCar++;
+        }
 
         // Newest wins: forward only 8-byte control/telemetry frames, drop stale ones
         const target = role === 'controller' ? room.control.car : room.control.controller;
@@ -271,12 +363,17 @@ wssVideo.on('connection', (ws, req, { roomId, role }) => {
             room.video.controller.close(1000, 'Replaced by new video viewer');
         }
         room.video.controller = ws;
+        ws.send(trackMessage);   // virtual track layout; poses follow at 20 Hz
     }
 
     ws.on('pong', () => { ws.isAlive = true; });
 
     ws.on('message', (data, isBinary) => {
-        if (!isBinary || role !== 'car') return;
+        if (role === 'controller') {
+            if (!isBinary && data.toString() === 'reset') ghosts.reset(roomId);   // car put back on the start line
+            return;
+        }
+        if (!isBinary) return;
 
         room.stats.framesReceived++;
 
@@ -312,10 +409,18 @@ const pingInterval = setInterval(() => {
     const now = Date.now();
 
     for (const [roomId, room] of rooms.entries()) {
+        if (room.carUdp && !carUdpFresh(room)) {
+            udpCars.delete(room.carUdp.key);
+            room.carUdp = null;
+            maybeCleanupRoom(roomId, room);
+        }
+
         // Ping Control sockets
         [room.control.car, room.control.controller].forEach((ws) => {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                if (!ws.isAlive) {
+                // Phone hotspots spike RTT to ~1 s (measured 849 ms); allow a few missed pongs
+                ws.missedPongs = ws.isAlive ? 0 : (ws.missedPongs || 0) + 1;
+                if (ws.missedPongs >= MAX_MISSED_PONGS) {
                     console.log(`[PING] Heartbeat timeout. Terminating socket (${ws.role}, Room: ${roomId})`);
                     return ws.terminate();
                 }
@@ -328,7 +433,8 @@ const pingInterval = setInterval(() => {
         // Ping Video sockets
         [room.video.car, room.video.controller].forEach((ws) => {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                if (!ws.isAlive) return ws.terminate();
+                ws.missedPongs = ws.isAlive ? 0 : (ws.missedPongs || 0) + 1;
+                if (ws.missedPongs >= MAX_MISSED_PONGS) return ws.terminate();
                 ws.isAlive = false;
                 ws.ping();
             }
@@ -337,7 +443,36 @@ const pingInterval = setInterval(() => {
 }, PING_INTERVAL_MS);
 pingInterval.unref();
 
-module.exports = { server, rooms };
+// ============================================================================
+// VIRTUAL TRACK (cars without a camera): move each online car's ghost from the
+// commands it was sent, then send every ghost's pose to every camera-less viewer.
+// ============================================================================
+const ghosts = new Ghosts();
+let lastTrackTick = performance.now();
+const trackInterval = setInterval(() => {
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - lastTrackTick) / 1000);   // measured: Windows timers drift
+    lastTrackTick = now;
+    const online = new Set([...rooms]
+        .filter(([, r]) => r.control.car?.readyState === WebSocket.OPEN || carUdpFresh(r))
+        .map(([id]) => id));
+    ghosts.tick(online, dt);
+    if (!ghosts.cars.size) return;
+    const msg = JSON.stringify(ghosts.snapshot());
+    for (const room of rooms.values()) {
+        const viewer = room.video.controller;
+        if (room.video.car || viewer?.readyState !== WebSocket.OPEN || viewer.bufferedAmount > VIDEO_HWM_BYTES) continue;
+        viewer.send(msg);
+    }
+}, 50);
+trackInterval.unref();
+
+// UDP lives and dies with the HTTP server (tests listen on port 0 for both)
+server.on('listening', () => udp.bind(UDP_PORT));
+server.on('close', () => udp.close());
+udp.on('listening', () => console.log(`  UDP control: port ${udp.address().port}`));
+
+module.exports = { server, rooms, udp };
 
 // Start server only when run directly (tests require() this file instead)
 if (require.main === module) {

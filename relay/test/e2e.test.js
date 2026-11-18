@@ -1,15 +1,17 @@
 // End-to-end: real relay + SimCar (firmware protocol twin) + raw controller sockets.
 process.env.RELAY_TOKEN = 'testtoken';
+process.env.UDP_PORT = '0';
 
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('node:http');
+const dgram = require('node:dgram');
 const WebSocket = require('ws');
-const { server } = require('../server');
+const { server, udp } = require('../server');
 const { SimCar, throttleToDuty } = require('../sim_car');
 
 const TOKEN = 'testtoken';
-let port;
+let port, udpPort;
 const cleanup = [];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -62,7 +64,10 @@ function get(path) {
     });
 }
 
-test.before(() => new Promise((r) => server.listen(0, () => { port = server.address().port; r(); })));
+test.before(() => new Promise((r) => {
+    udp.once('listening', () => { udpPort = udp.address().port; r(); });
+    server.listen(0, () => { port = server.address().port; });
+}));
 test.afterEach(async () => { while (cleanup.length) cleanup.pop()(); await sleep(50); });
 test.after(() => new Promise((r) => server.close(r)));
 
@@ -123,21 +128,27 @@ test('car ACK reaches controller echoing seq, battery 7800', async () => {
     assert.strictEqual(a.readInt8(6), -55);
 });
 
-test('failsafe trips 300 ms after last packet, re-arms on next packet', async () => {
+test('link loss: holds 300 ms, fades, brakes ~800 ms after last packet, re-arms on next', async () => {
     const car = sim('fs');
     await waitFor(() => car.controlConnected, 2000, 'car connect');
     const ctl = await open('/ws/control', { room: 'fs' });
+    const full = throttleToDuty(80);
     const t0 = Date.now();
     while (Date.now() - t0 < 300) { ctl.send(pkt(80, 80)); await sleep(20); }
     assert.strictEqual(car.failsafe, false);
-    assert.ok(car.dutyL > 0);
+    assert.strictEqual(car.dutyL, full);
     const last = Date.now();
-    await waitFor(() => car.failsafe, 600, 'failsafe');
+    await sleep(150);
+    assert.strictEqual(car.dutyL, full, 'full command during the hold');
+    await waitFor(() => car.fading && car.dutyL > 0 && car.dutyL < full, 500, 'fade');
+    const fadeAt = Date.now() - last;
+    assert.ok(fadeAt >= 280 && fadeAt <= 650, `fade started ${fadeAt} ms after the last packet`);
+    await waitFor(() => car.failsafe, 900, 'failsafe');
     const dt = Date.now() - last;
-    assert.ok(dt >= 280 && dt <= 450, `failsafe after ${dt} ms`);
+    assert.ok(dt >= 780 && dt <= 950, `failsafe after ${dt} ms`);
     assert.strictEqual(car.dutyL, 0);
     ctl.send(pkt(80, 80));
-    await waitFor(() => !car.failsafe && car.dutyL > 0, 300, 're-arm');
+    await waitFor(() => !car.failsafe && car.dutyL === full, 300, 're-arm');
 });
 
 test('controller disconnect -> car stops within failsafe window', async () => {
@@ -147,7 +158,7 @@ test('controller disconnect -> car stops within failsafe window', async () => {
     ctl.send(pkt(100, 100));
     await waitFor(() => car.dutyL === 255);
     ctl.terminate();
-    await waitFor(() => car.failsafe && car.dutyL === 0, 450, 'stop after controller drop');
+    await waitFor(() => car.failsafe && car.dutyL === 0, 1000, 'stop after controller drop');
 });
 
 test('brake flag -> zero duty', async () => {
@@ -202,11 +213,87 @@ test('empty rooms are removed from /health', async () => {
     assert.strictEqual(JSON.parse((await get('/health')).body).rooms.tmp, undefined);
 });
 
+test('lobby: each claim gets a different free car, none when all taken, hold ends on connect', async () => {
+    const a = sim('lobby_a'), b = sim('lobby_b');
+    await waitFor(() => a.controlConnected && b.controlConnected, 2000, 'cars connect');
+    const claim = async () => JSON.parse((await get('/claim')).body);
+
+    const first = await claim(), second = await claim(), third = await claim();
+    assert.deepStrictEqual([first.room, second.room].sort(), ['lobby_a', 'lobby_b']);
+    assert.strictEqual(third.room, null);
+    assert.strictEqual(third.cars, 2);
+
+    // The player for lobby_a drives, then leaves: lobby_a is free again, not held
+    const ctl = await open('/ws/control', { room: 'lobby_a' });
+    assert.strictEqual((await claim()).room, null);
+    ctl.close();
+    await sleep(100);
+    assert.strictEqual((await claim()).room, 'lobby_a');
+});
+
+test('lobby: a picked car is claimed only while free, and shows as claimed', async () => {
+    const a = sim('pick_a'), b = sim('pick_b');
+    await waitFor(() => a.controlConnected && b.controlConnected, 2000, 'cars connect');
+    const claim = async (room) => JSON.parse((await get('/claim?room=' + room)).body);
+
+    assert.strictEqual((await claim('pick_b')).room, 'pick_b');
+    assert.strictEqual((await claim('pick_b')).room, null);   // held for the first picker
+    assert.strictEqual(JSON.parse((await get('/health')).body).rooms.pick_b.claimed, true);
+    assert.strictEqual((await claim('no_such_car')).room, null);
+    assert.strictEqual((await claim('pick_a')).room, 'pick_a');
+
+    // Its player connects: still taken, but no longer "claimed"
+    const ctl = await open('/ws/control', { room: 'pick_b' });
+    assert.strictEqual((await claim('pick_b')).room, null);
+    assert.strictEqual(JSON.parse((await get('/health')).body).rooms.pick_b.claimed, false);
+    ctl.close();
+});
+
+test('virtual track: ghost follows commands, stops on link loss like the car, reset returns it', async () => {
+    const car = sim('trk_a');
+    await waitFor(() => car.controlConnected, 2000, 'car connects');
+    // Listener before 'open': the layout is sent on connect and can arrive with the handshake
+    const vid = new WebSocket(`ws://localhost:${port}/ws/video?room=trk_a&role=controller&token=${TOKEN}`);
+    cleanup.push(() => vid.terminate());
+    const msgs = [];
+    vid.on('message', (d, bin) => { if (!bin) msgs.push(JSON.parse(d)); });
+    await new Promise((r) => vid.once('open', r));
+    const pose = () => [...msgs].reverse().find((m) => m.t === 'cars' && m.cars.trk_a)?.cars.trk_a;
+    await waitFor(() => msgs[0]?.t === 'track' && pose(), 1000, 'track layout + pose');
+    assert.ok(msgs[0].pts.length > 50 && msgs[0].width > 0);
+    const start = pose();
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+    // Full forward for 600 ms: ~0.36 m at 0.6 m/s, straight ahead
+    const ctl = await open('/ws/control', { room: 'trk_a' });
+    for (let i = 0; i < 30; i++) { ctl.send(pkt(100, 100)); await sleep(20); }
+    const moved = pose();
+    assert.ok(dist(start, moved) > 0.2, `moved ${dist(start, moved).toFixed(3)} m`);
+    assert.ok(Math.abs(moved.h - start.h) < 0.01, 'equal tracks drive straight');
+
+    // Commands stop: fades and stops by 800 ms, then holds still
+    await sleep(1000);
+    const p1 = pose();
+    await sleep(300);
+    assert.ok(dist(p1, pose()) < 0.005, 'stopped after failsafe');
+
+    // Left track faster turns right (clockwise = heading grows)
+    for (let i = 0; i < 15; i++) { ctl.send(pkt(100, 0)); await sleep(20); }
+    assert.ok(pose().h > p1.h + 0.1, 'left-only command turns clockwise');
+
+    vid.send('reset');
+    await waitFor(() => dist(pose(), start) < 0.01 && Math.abs(pose().h - start.h) < 0.01, 1000, 'back on the grid');
+});
+
 test('static cockpit whitelist', async () => {
-    const idx = await get('/');
+    const lobby = await get('/');
+    assert.strictEqual(lobby.status, 200);
+    assert.match(lobby.body, /\/claim/);
+    const idx = await get('/index.html');
     assert.strictEqual(idx.status, 200);
     assert.match(idx.body, /fpv-canvas/);
     assert.strictEqual((await get('/app.js')).status, 200);
+    assert.strictEqual((await get('/bg.js')).status, 200);
     assert.strictEqual((await get('/style.css')).status, 200);
     assert.strictEqual((await get('/server.js')).status, 404);
     assert.strictEqual((await get('/../relay/server.js')).status, 404);
@@ -250,4 +337,73 @@ test('duty mapping matches motor.cpp throttleToDuty', () => {
     assert.strictEqual(throttleToDuty(50), 128);       // (50*255+50)/100 = 128
     assert.strictEqual(throttleToDuty(1, 70), 72);     // 70 + (185+50)/100
     assert.strictEqual(throttleToDuty(100, 70), 255);
+});
+
+// ---- UDP control path (weak-link transport) ----
+const health = async () => JSON.parse((await get('/health')).body);
+
+test('UDP: hello registers the car; every command arrives twice and is applied once', async () => {
+    const car = sim('u1', { udpPort });
+    await waitFor(() => car.controlConnected, 2000, 'car connect');
+    const h0 = Date.now();
+    while (!(await health()).rooms.u1?.carUdp) {
+        assert.ok(Date.now() - h0 < 2500, 'car UDP registered');
+        await sleep(50);
+    }
+    const ctl = await open('/ws/control', { room: 'u1' });
+    for (let i = 0; i < 20; i++) { ctl.send(pkt(40 + i, 40 + i)); await sleep(15); }
+    await waitFor(() => car.udpApplied + car.wsApplied + car.staleDropped >= 40, 1000, 'both copies');
+    assert.strictEqual(car.packetsReceived, 20, 'each command applied exactly once');
+    assert.strictEqual(car.staleDropped, 20, 'the second copy of each is dropped');
+    assert.strictEqual(car.udpArrived, 20, 'every command also arrived over UDP');
+    assert.strictEqual(car.left, 59);
+    assert.ok((await health()).rooms.u1.stats.udpToCar >= 20);
+});
+
+test('UDP: ACKs come back over UDP and reach the controller', async () => {
+    const car = sim('u2', { udpPort });
+    await waitFor(() => car.controlConnected, 2000, 'car connect');
+    const ctl = await open('/ws/control', { room: 'u2' });
+    const acks = [];
+    ctl.on('message', (d) => acks.push(d));
+    const t0 = Date.now();
+    while (Date.now() - t0 < 2500 && !(car._udpFresh() && acks.length > 3)) { ctl.send(pkt(30, 30)); await sleep(20); }
+    assert.ok(car._udpFresh(), 'UDP delivering to the car');
+    const before = (await health()).rooms.u2.stats.udpFromCar;
+    for (let i = 0; i < 15; i++) { ctl.send(pkt(30, 30)); await sleep(20); }
+    const h = (await health()).rooms.u2.stats;
+    assert.ok(h.udpFromCar > before, `ACKs over UDP: ${before} -> ${h.udpFromCar}`);
+    assert.ok(acks.length > 3 && acks.every((a) => a.length === 8));
+});
+
+test('UDP: hello with a wrong token or bad room is ignored', async () => {
+    const s = dgram.createSocket('udp4');
+    cleanup.push(() => s.close());
+    await new Promise((r) => s.bind(0, r));
+    for (const m of ['HELLO u3 wrongtoken', 'HELLO u3', 'HELLO a/b testtoken', 'HELLO ' + 'x'.repeat(40) + ' testtoken']) {
+        s.send(m, udpPort, '127.0.0.1');
+    }
+    await sleep(150);
+    const rooms = (await health()).rooms;
+    assert.strictEqual(rooms.u3, undefined, 'no room from a bad hello');
+    s.send('HELLO u3 testtoken', udpPort, '127.0.0.1');
+    await waitFor(() => true, 10);
+    await sleep(100);
+    assert.strictEqual((await health()).rooms.u3?.carUdp, true, 'good hello registers');
+});
+
+test('UDP: car keeps driving when its WebSocket drops while UDP is live', async () => {
+    const car = sim('u4', { udpPort });
+    await waitFor(() => car.controlConnected, 2000, 'car connect');
+    const ctl = await open('/ws/control', { room: 'u4' });
+    let driving = true;
+    (async () => { while (driving) { ctl.send(pkt(60, 60)); await sleep(20); } })();
+    await waitFor(() => car._udpFresh() && car.dutyL > 0, 2500, 'driving over UDP');
+    car._sockets.control.terminate();          // TCP path dies, UDP keeps going
+    await waitFor(() => !car.controlConnected, 500, 'ws closed');
+    await sleep(200);
+    assert.strictEqual(car.failsafe, false, 'no brake while UDP delivers');
+    assert.strictEqual(car.dutyL, throttleToDuty(60));
+    driving = false;
+    await waitFor(() => car.failsafe, 1200, 'brake once UDP stops too');
 });

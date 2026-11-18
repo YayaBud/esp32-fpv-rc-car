@@ -16,10 +16,10 @@
 
 #include <Arduino.h>
 
-#define L_IN1 32
-#define L_IN2 33
-#define R_IN1 25
-#define R_IN2 26
+#define L_IN1 14
+#define L_IN2 27
+#define R_IN1 26
+#define R_IN2 32
 #define LED   2
 
 static void set(int in1, int in2, int in3, int in4) {

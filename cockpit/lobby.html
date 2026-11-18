@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0b0a26">
+    <title>FPV Tank Lobby</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Jersey+10&family=Pixelify+Sans:wght@400..700&family=Silkscreen&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <main class="lobby">
+        <h1 class="title">FPV&middot;TANK</h1>
+        <section class="menu" aria-labelledby="lead">
+            <h2 class="lead" id="lead">Pick a car to drive</h2>
+            <ul class="cars" id="cars"></ul>
+            <p class="empty" id="empty" hidden>No cars online yet. Switch one on and it shows up here.</p>
+            <button id="any" class="key any" type="button">Any free car</button>
+        </section>
+        <p class="msg" id="msg" role="status"></p>
+    </main>
+    <script src="/bg.js" data-scroll></script>
+    <script>
+        // Lists the relay's cars from /health; Drive claims that car (/claim?room=) and opens the
+        // driving screen. The claim holds the car for 10 s so two players can't pick the same one.
+        const list = document.getElementById('cars');
+        const msg = document.getElementById('msg');
+        const anyBtn = document.getElementById('any');
+        let rooms = {}, joining = false, shown = '';
+
+        function carStatus(r) {
+            if (!r.carConnected) return ['off', 'Car offline'];
+            if (r.controllerConnected) return ['busy', 'Being driven'];
+            if (r.claimed) return ['busy', 'Someone is joining'];
+            return ['free', 'Free'];
+        }
+
+        function render() {
+            const ids = rooms ? Object.keys(rooms).sort() : [];
+            const statuses = ids.map((id) => carStatus(rooms[id]));
+            // Rebuild only when something changed, so a focused Drive button keeps focus
+            const sig = JSON.stringify([rooms === null, joining, ids, statuses]);
+            if (sig === shown) return;
+            shown = sig;
+
+            list.replaceChildren(...ids.map((id, i) => {
+                const [cls, label] = statuses[i];
+                const n = id.match(/(\d+)$/);
+                const name = n ? 'Car ' + Number(n[1]) : id;
+                const li = document.createElement('li');
+                li.innerHTML = '<button class="key car" type="button"><span class="led" aria-hidden="true"></span>' +
+                    '<span class="who"><b></b><small></small></span><span class="go" aria-hidden="true">Drive</span></button>';
+                const btn = li.firstChild;
+                btn.classList.add(cls);
+                btn.title = id;
+                btn.querySelector('b').textContent = name;
+                btn.querySelector('small').textContent = label;
+                btn.setAttribute('aria-label', `Drive ${name} (${id}): ${label}`);
+                btn.disabled = joining || cls !== 'free';
+                btn.onclick = () => join(id);
+                return li;
+            }));
+            document.getElementById('empty').hidden = rooms === null || ids.length > 0;
+            anyBtn.disabled = joining || !statuses.some(([cls]) => cls === 'free');
+            if (!joining) msg.textContent = rooms === null ? 'Can’t reach the server. Retrying…' : '';
+        }
+
+        async function poll() {
+            try {
+                rooms = (await (await fetch('/health', { cache: 'no-store' })).json()).rooms;
+            } catch (e) {
+                rooms = null;
+            }
+            render();
+        }
+
+        async function join(room) {
+            joining = true;
+            render();
+            msg.textContent = 'Joining…';
+            let data = null;
+            try {
+                const q = room ? '?room=' + encodeURIComponent(room) : '';
+                data = await (await fetch('/claim' + q, { cache: 'no-store' })).json();
+            } catch (e) { /* unreachable: message below */ }
+
+            if (data?.room) {
+                location.href = '/index.html?room=' + encodeURIComponent(data.room);
+                return;
+            }
+            joining = false;
+            await poll();
+            msg.textContent = !data ? 'Can’t reach the server' :
+                room ? 'Someone just took that car' : 'No free car right now';
+        }
+
+        anyBtn.onclick = () => join(null);
+        // Back from the driving screen restores this page from bfcache mid-join: unlock it
+        addEventListener('pageshow', (e) => { if (e.persisted) { joining = false; shown = ''; poll(); } });
+        setInterval(poll, 2000);
+        poll();
+    </script>
+</body>
+</html>

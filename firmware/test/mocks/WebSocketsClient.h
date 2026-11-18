@@ -1,5 +1,6 @@
 #pragma once
 #include "Arduino.h"
+#include <deque>
 
 enum WStype_t {
     WStype_ERROR, WStype_DISCONNECTED, WStype_CONNECTED, WStype_TEXT, WStype_BIN,
@@ -16,13 +17,18 @@ public:
     bool ssl = false, connected = false;
     WebSocketClientEvent cb = nullptr;
     std::vector<std::vector<uint8_t>> sent;
+    std::deque<std::vector<uint8_t>> rx;   // frames delivered one per loop(), like the real library
 
     void begin(const char* h, uint16_t p, const char* u) { host = h; port = p; url = u; }
     void beginSSL(const char* h, uint16_t p, const char* u) { begin(h, p, u); ssl = true; }
     void onEvent(WebSocketClientEvent e) { cb = e; }
     void setReconnectInterval(unsigned long) {}
     void enableHeartbeat(uint32_t, uint32_t, uint8_t) {}
-    void loop() {}
+    void loop() {
+        if (rx.empty() || !cb) return;
+        auto f = rx.front(); rx.pop_front();
+        cb(WStype_BIN, f.data(), f.size());
+    }
     bool isConnected() { return connected; }
     bool sendBIN(const uint8_t* p, size_t n) {
         if (!connected) return false;
